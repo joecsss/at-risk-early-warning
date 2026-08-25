@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/*.csv
+data/metadata.json
+models/*.joblib
+models/metrics.json
+reports/
+.DS_Store
+.ipynb_checkpoints/
+
+# LaTeX report (kept local only)
+report/
+
+# Local editor / tool settings
+.claude/settings.local.json

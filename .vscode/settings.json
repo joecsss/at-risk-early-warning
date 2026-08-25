@@ -1,0 +1,52 @@
+{
+}{
+  // ===== LaTeX Workshop: ตั้งค่าสำหรับเทมเพลต KKU (XeLaTeX + ฟอนต์ไทย + BibTeX) =====
+
+  // เครื่องมือย่อยที่จะถูกเรียกใน recipe
+  "latex-workshop.latex.tools": [
+    {
+      "name": "xelatex",
+      "command": "xelatex",
+      "args": [
+        "-synctex=1",
+        "-interaction=nonstopmode",
+        "-file-line-error",
+        "%DOC%"
+      ],
+      "env": {}
+    },
+    {
+      "name": "bibtex",
+      "command": "bibtex",
+      "args": ["%DOCFILE%"],
+      "env": {}
+    }
+  ],
+
+  // recipe หลัก: XeLaTeX -> BibTeX -> XeLaTeX -> XeLaTeX (กด build ครั้งเดียวได้ครบ ตารางอ้างอิงขึ้นเอง)
+  "latex-workshop.latex.recipes": [
+    {
+      "name": "XeLaTeX + BibTeX (เต็มลำดับ)",
+      "tools": ["xelatex", "bibtex", "xelatex", "xelatex"]
+    },
+    {
+      "name": "XeLaTeX เดี่ยว (แก้ข้อความเล็ก ๆ เร็ว ๆ)",
+      "tools": ["xelatex"]
+    }
+  ],
+  "latex-workshop.latex.recipe.default": "first",
+
+  // ไม่ต้องถามเรื่องไฟล์ราก (main.tex มี % !TeX root ให้ chapter อยู่แล้ว)
+  "latex-workshop.latex.rootFile.doNotPrompt": true,
+
+  // เปิดพรีวิว PDF ในแท็บข้าง ๆ อัตโนมัติหลังคอมไพล์
+  "latex-workshop.view.pdf.viewer": "tab",
+
+  // เก็บไฟล์ชั่วคราว (.aux .log .bbl ฯลฯ) ไว้ ไม่ลบ .bbl ทิ้ง (สำคัญกับ BibTeX)
+  "latex-workshop.latex.autoClean.run": "never",
+
+  // คอมไพล์อัตโนมัติเมื่อเซฟไฟล์ (ถ้าอยากกดเอง เปลี่ยนเป็น "never")
+  "latex-workshop.latex.autoBuild.run": "onSave",
+
+  "latex-workshop.message.badbox.show": false
+}
