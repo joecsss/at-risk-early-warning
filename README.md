@@ -15,10 +15,12 @@ at-risk-early-warning/
 │  ├─ data_prep.py      # โหลด/เตรียมข้อมูล + feature engineering + แบ่ง train/test
 │  ├─ train.py          # เทรน & เทียบโมเดล (CV) + จูน threshold + เซฟโมเดล
 │  ├─ explain.py        # SHAP อธิบายผล (ภาพรวม + รายบุคคล)
+│  ├─ make_report.py    # สร้างตาราง/รูปสำหรับเล่ม LaTeX -> reports/latex/
+│  ├─ refresh.py        # รันไปป์ไลน์ใหม่ทั้งชุด (เตรียมข้อมูล -> เทรน -> SHAP -> ชิ้นส่วนรายงาน)
 │  └─ app.py            # แดชบอร์ด Streamlit สำหรับอาจารย์
 ├─ data/                # ข้อมูล (ไม่ commit — ดู data/README.md)
 ├─ models/              # โมเดลที่เทรนแล้ว (.joblib) + metrics.json
-├─ reports/             # กราฟสำหรับใส่ในรายงาน (ROC/PR, SHAP)
+├─ reports/             # ผลลัพธ์ที่โค้ดสร้าง — กราฟ (ROC/PR, SHAP) + latex/ (ไม่ commit)
 ├─ requirements.txt
 └─ README.md
 ```
@@ -37,6 +39,11 @@ python src/data_prep.py        # เตรียมข้อมูล -> data/pr
 python src/train.py            # เทรน+ประเมิน -> models/model.joblib + metrics.json
 python src/explain.py          # (ไม่บังคับ) พิมพ์ตัวอย่างเหตุผล + เซฟกราฟ SHAP ลง reports/
 streamlit run src/app.py       # เปิดแดชบอร์ด -> http://localhost:8501
+```
+
+รันใหม่ทั้งชุดหลังแก้โค้ดหรือเปลี่ยนข้อมูล:
+```bash
+python src/refresh.py          # data_prep -> train -> explain -> make_report ตามลำดับ
 ```
 
 ### ตัวเลือกที่ใช้บ่อย
@@ -99,6 +106,7 @@ python src/train.py --operating-point f2      # เลือกจุดทำ�
 - **เฟส 3:** (ถ้าเป็นไปได้) ทดลองกับข้อมูลบริบทไทย/มข. โดยคำนึงถึงความเป็นส่วนตัว
 
 ## หมายเหตุ
+- repo นี้เก็บเฉพาะโค้ด — ตัวเล่มปริญญานิพนธ์ (LaTeX) ไม่ได้เผยแพร่ที่นี่
 - เริ่มด้วยชุดข้อมูลสาธารณะ (UCI dropout) เพื่อไม่ให้ติดเรื่องขอข้อมูล
 - ระบบเป็นเครื่องมือ "สนับสนุนการตัดสินใจ" ของอาจารย์ ไม่ตัดสินผลการเรียนอัตโนมัติ
 - รหัสนักศึกษาในแดชบอร์ด (`S0001`…) เป็นรหัสจำลอง เพราะชุดข้อมูล UCI ไม่มีตัวระบุตัวตน
