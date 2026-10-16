@@ -17,6 +17,10 @@ at-risk-early-warning/
 │  ├─ explain.py        # SHAP อธิบายผล (ภาพรวม + รายบุคคล)
 │  ├─ make_report.py    # สร้างตาราง/รูปสำหรับเล่ม LaTeX -> reports/latex/
 │  ├─ refresh.py        # รันไปป์ไลน์ใหม่ทั้งชุด (เตรียมข้อมูล -> เทรน -> SHAP -> ชิ้นส่วนรายงาน)
+│  ├─ kku_schema.py     # พจนานุกรมข้อมูลตามระบบทะเบียน มข. + ตรวจไฟล์
+│  ├─ kku_mapping.py    # ตัวแปลงข้อมูล มข. -> ฟีเจอร์ UCI (ใช้กับโมเดลชั่วคราว)
+│  ├─ kku_timeline.py   # ประเมินความเสี่ยงทุกภาค (โมเดล + กฎทะเบียน + แนวโน้ม)
+│  ├─ train_kku.py      # ฝึกโมเดลจากข้อมูล มข. (python src/train_kku.py --data <csv>)
 │  └─ app.py            # แดชบอร์ด Streamlit สำหรับอาจารย์
 ├─ data/                # ข้อมูล (ไม่ commit — ดู data/README.md)
 ├─ models/              # โมเดลที่เทรนแล้ว (.joblib) + metrics.json

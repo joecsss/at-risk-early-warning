@@ -17,6 +17,7 @@ TEST_CSV = os.path.join(DATA_DIR, "processed_test.csv")
 METADATA_JSON = os.path.join(DATA_DIR, "metadata.json")
 MODEL_FILE = os.path.join(MODEL_DIR, "model.joblib")
 METRICS_JSON = os.path.join(MODEL_DIR, "metrics.json")
+MODEL_KKU_FILE = os.path.join(MODEL_DIR, "model_kku.joblib")            # ฝึกจากข้อมูล มข. จริง
 
 ID_COL = "student_id"
 TARGET_COL = "at_risk"

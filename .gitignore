@@ -3,15 +3,24 @@ __pycache__/
 .venv/
 venv/
 data/*.csv
+# ข้อยกเว้นสำหรับเดโมออนไลน์: ไฟล์ที่สร้างจากชุดสาธารณะ UCI เท่านั้น (ไม่มีข้อมูลจริงของนักศึกษา)
+!data/processed_train.csv
+!data/processed_test.csv
 data/metadata.json
 models/*.joblib
 models/metrics.json
+# ข้อยกเว้นสำหรับเดโมออนไลน์: โมเดลที่ฝึกจาก UCI (ส่วน model_kku*.joblib ยังถูกกันไว้)
+!models/model.joblib
+!models/metrics.json
 reports/
 .DS_Store
 .ipynb_checkpoints/
 
 # LaTeX report (kept local only)
 report/
+
+# ข้อมูลจริงของนักศึกษา มข. (มีข้อมูลส่วนบุคคล — ห้ามขึ้น GitHub)
+src/kku_real_sample.py
 
 # Local editor / tool settings
 .claude/settings.local.json

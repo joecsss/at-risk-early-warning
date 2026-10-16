@@ -1,6 +1,8 @@
 # ข้อมูล (Data)
 
-ไฟล์ข้อมูลไม่ถูก commit เข้า git — โหลด/สร้างเองตามด้านล่าง
+ไฟล์ข้อมูลส่วนใหญ่ไม่ถูก commit เข้า git — โหลด/สร้างเองตามด้านล่าง
+
+ยกเว้น `processed_train.csv` และ `processed_test.csv` ซึ่งสร้างจากชุดสาธารณะ UCI (สัญญาอนุญาต CC BY 4.0, Realinho et al.) และ commit ไว้เพื่อให้เดโมออนไลน์ทำงานได้ ห้าม commit ไฟล์ข้อมูลจริงของนักศึกษา มข. เด็ดขาด
 
 ## ค่าเริ่มต้น: UCI "Predict Students' Dropout and Academic Success"
 `src/data_prep.py` จะดึงให้อัตโนมัติผ่านไลบรารี `ucimlrepo` (id = 697)

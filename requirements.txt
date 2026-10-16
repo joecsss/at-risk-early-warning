@@ -1,6 +1,6 @@
 pandas
 numpy
-scikit-learn
+scikit-learn==1.9.0   # ต้องตรงกับเวอร์ชันที่ใช้สร้าง models/model.joblib
 imbalanced-learn
 shap
 matplotlib
