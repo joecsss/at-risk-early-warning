@@ -8,6 +8,7 @@ train_kku.py — ฝึกโมเดลจากข้อมูลรูปแ
 
 รัน:
     python src/train_kku.py --data data/kku_terms.csv   # -> models/model_kku.joblib
+    python src/train_kku.py --db                        # ใช้ข้อมูลทั้งหมดในฐานข้อมูล (data/kku_app.db)
 
 แบ่ง fold ตาม "ตัวนักศึกษา" (GroupKFold) เพื่อไม่ให้ภาคของคนเดียวกันอยู่ทั้งฝั่งฝึกและฝั่งทดสอบ
 """
@@ -75,12 +76,19 @@ def report(y, p, thr, tag: str) -> dict:
 def main() -> None:
     setup_console()
     ap = argparse.ArgumentParser(description="ฝึกโมเดลจากข้อมูลทะเบียน มข.")
-    ap.add_argument("--data", required=True, help="CSV รูปแบบทะเบียน มข. (1 แถว = 1 คน × 1 ภาค)")
+    ap.add_argument("--data", help="CSV รูปแบบทะเบียน มข. (1 แถว = 1 คน × 1 ภาค)")
+    ap.add_argument("--db", action="store_true", help="อ่านข้อมูลจากฐานข้อมูลของระบบแทนไฟล์ CSV")
     ap.add_argument("--horizon", type=int, default=2, help="ทำนายล่วงหน้ากี่ภาค")
     ap.add_argument("--target-recall", type=float, default=0.85)
     ap.add_argument("--folds", type=int, default=5)
     args = ap.parse_args()
-    raw = pd.read_csv(args.data)
+    if not args.data and not args.db:
+        ap.error("ระบุ --data <ไฟล์> หรือ --db")
+    if args.db:
+        import db
+        raw = db.load_students()
+    else:
+        raw = pd.read_csv(args.data)
     errors = validate(raw)
     if errors:
         raise SystemExit("ข้อมูลไม่ถูกต้อง:\n- " + "\n- ".join(errors[:20]))

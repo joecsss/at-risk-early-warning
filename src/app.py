@@ -8,6 +8,7 @@ app.py — แดชบอร์ดสำหรับอาจารย์ที
 """
 from __future__ import annotations
 
+import hmac
 import os
 import sys
 
@@ -24,6 +25,7 @@ from common import (ID_COL, METRICS_JSON, MODEL_FILE, MODEL_KKU_FILE, TARGET_COL
 from explain import RiskExplainer
 from feature_labels import GENERIC_INTERVENTION, decode_value, label_th, suggest
 from kku_mapping import PARENT_EDU, PARENT_OCC, STATUS_OPTIONS
+import db
 from kku_schema import CHOICES, TERM_FIELDS, dictionary_df
 from kku_schema import COLUMNS as KKU_SCHEMA_COLUMNS
 from kku_schema import template_df as kku_template_df
@@ -35,8 +37,165 @@ from kku_timeline import (DISMISS_GPAX, KKU_FEATURE_LABELS, KKU_FEATURES, KKU_IN
 st.set_page_config(page_title="ระบบเตือนภัยล่วงหน้านักศึกษาเสี่ยง",
                    page_icon="🎓", layout="wide")
 
-BAND_COLORS = {"เสี่ยงสูง": "#D64545", "เสี่ยงปานกลาง": "#E8A33D",
-               "เฝ้าระวัง": "#4C78A8", "ปกติ": "#7A8B99"}
+# ------------------------------------------------------------- ธีมและหน้าตา
+# สีอิฐอ่านจาก .streamlit/config.toml (theme.primaryColor) — แก้ที่ไฟล์นั้นที่เดียว
+BRICK = st.get_option("theme.primaryColor") or "#A3422B"
+LINE = st.get_option("theme.borderColor") or "#DDD8D3"                 # เส้นขอบบาง
+SURFACE = st.get_option("theme.secondaryBackgroundColor") or "#F4F2F0"  # เทาอ่อนมาก
+
+
+def _shade(hex_color: str, factor: float) -> str:
+    """ปรับสีให้เข้มขึ้น (factor < 1) หรืออ่อนลง (factor > 1) ใช้กับเส้นขอบ/แถบหัว"""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    rgb = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return "#" + "".join(f"{min(255, max(0, round(c * factor))):02X}" for c in rgb)
+
+
+BRICK_DARK = _shade(BRICK, 0.76)
+
+# สีระดับความเสี่ยง — ความหมายเดิม ปรับโทนให้เข้ากับสีอิฐและอ่านออกบนพื้นขาว
+BAND_COLORS = {"เสี่ยงสูง": "#9E2B1E", "เสี่ยงปานกลาง": "#C8781F",
+               "เฝ้าระวัง": "#4A6B8A", "ปกติ": "#7D8A93"}
+# ระดับของแท็บ มข. ใช้ชุดสีเดียวกัน โดยไม่แก้ kku_timeline.py ("เสี่ยง" = ปานกลาง)
+_LEVEL_TO_BAND = {"ปกติ": "ปกติ", "เฝ้าระวัง": "เฝ้าระวัง",
+                  "เสี่ยง": "เสี่ยงปานกลาง", "เสี่ยงสูง": "เสี่ยงสูง"}
+LEVEL_PALETTE = {lv: BAND_COLORS.get(_LEVEL_TO_BAND.get(lv, ""), c)
+                 for lv, c in LEVEL_COLORS.items()}
+RISE_COLOR = BAND_COLORS["เสี่ยงสูง"]     # ปัจจัยที่เพิ่มความเสี่ยง
+FALL_COLOR = "#2E7D55"                    # ปัจจัยที่ลดความเสี่ยง
+STEEL = BAND_COLORS["เฝ้าระวัง"]          # แท่งกราฟข้อมูลทั่วไป
+MUTED = "#9AA3A8"                         # เส้นอ้างอิง/เส้นตามแผน
+
+
+def inject_style() -> None:
+    """โหลดฟอนต์ Sarabun และใส่ CSS ของธีมทั้งหมด — เรียกครั้งเดียวตอนต้นแอป
+
+    ใช้เฉพาะตัวเลือกที่คงที่ข้ามเวอร์ชัน (data-testid, data-baseweb, ชื่อ element)
+    ไม่ผูกกับคลาสสุ่มของ Streamlit เช่น .css-1d391kg เพราะคลาสพวกนั้นเปลี่ยนทุกเวอร์ชัน
+    """
+    font_url = ("https://fonts.googleapis.com/css2?"
+                "family=Sarabun:wght@400;500;600;700&display=swap")
+    variables = (f":root{{--kku-brick:{BRICK};--kku-brick-dark:{BRICK_DARK};"
+                 f"--kku-line:{LINE};--kku-surface:{SURFACE};"
+                 "--kku-font:'Sarabun','Segoe UI',Tahoma,sans-serif;}")
+    css = """
+/* ---------- ฟอนต์ (ถ้าโหลด Google Fonts ไม่ได้ จะตกไปใช้ sans-serif ของเครื่อง) ---------- */
+html, body, [data-testid="stAppViewContainer"], [data-testid="stSidebar"],
+button, input, select, textarea, [data-baseweb="select"] {
+    font-family: var(--kku-font);
+}
+
+/* ---------- โครงหน้า ---------- */
+[data-testid="stHeader"] { background: transparent; height: 2.6rem; }
+[data-testid="stAppDeployButton"] { display: none; }
+[data-testid="stMainBlockContainer"] { max-width: 1240px; padding: 2.9rem 2.5rem 1.5rem; }
+[data-testid="stSidebar"] { background: #F7F6F4; border-right: 1px solid var(--kku-line); }
+[data-testid="stSidebarUserContent"] { padding-top: 1.1rem; }
+
+/* ---------- แถบหัวเว็บ ---------- */
+.kku-header {
+    background: var(--kku-brick);
+    border-bottom: 4px solid var(--kku-brick-dark);
+    border-radius: 4px;
+    padding: 1.05rem 1.4rem;
+    margin-bottom: 1.5rem;
+}
+.kku-header .kku-title {
+    color: #FFFFFF; font-size: 1.4rem; font-weight: 600; line-height: 1.45;
+}
+.kku-header .kku-sub {
+    color: #F0DCD6; font-size: .82rem; font-weight: 400; line-height: 1.55; margin-top: .3rem;
+}
+
+/* ---------- ส่วนท้าย ---------- */
+.kku-footer {
+    background: var(--kku-surface);
+    border-top: 3px solid var(--kku-brick);
+    border-radius: 4px;
+    padding: .95rem 1.25rem;
+    margin-top: 2.2rem;
+    color: #45403C; font-size: .83rem; line-height: 1.6;
+}
+.kku-footer .kku-note { color: #6E6660; font-size: .78rem; margin-top: .35rem; }
+
+/* ---------- หัวข้อ ---------- */
+[data-testid="stMain"] h2 { font-size: 1.2rem; font-weight: 600; padding-top: .4rem; }
+[data-testid="stMain"] h3 {
+    font-size: 1.02rem; font-weight: 600;
+    border-left: 3px solid var(--kku-brick); padding-left: .6rem;
+}
+[data-testid="stSidebar"] h2 { font-size: .98rem; font-weight: 600; }
+[data-testid="stSidebar"] h3 { font-size: .92rem; font-weight: 600; }
+
+/* ---------- การ์ดตัวเลขสรุป ---------- */
+[data-testid="stColumn"] > [data-testid="stVerticalBlock"] { height: 100%; }
+[data-testid="stElementContainer"]:has(> [data-testid="stMetric"]) { height: 100%; }
+[data-testid="stMetric"] {
+    background: #FFFFFF; border: 1px solid var(--kku-line); border-radius: 4px;
+    padding: .8rem 1rem; box-shadow: none;
+    height: 100%; min-height: 5.2rem;   /* ให้การ์ดในแถวเดียวกันสูงเท่ากัน */
+}
+[data-testid="stMetricLabel"] p { font-size: .8rem; font-weight: 500; color: #5A544F; }
+[data-testid="stMetricValue"] { font-size: 1.5rem; font-weight: 600; }
+
+/* ---------- แท็บ ---------- */
+[data-baseweb="tab-list"] { gap: .15rem; border-bottom: 1px solid var(--kku-line); }
+[data-testid="stTab"] { font-weight: 500; padding: .55rem .95rem; }
+[data-testid="stTab"][aria-selected="true"] { color: var(--kku-brick); font-weight: 600; }
+
+/* ---------- ตาราง (สีหัวตารางตั้งไว้ที่ .streamlit/config.toml) ---------- */
+[data-testid="stDataFrame"] { border: 1px solid var(--kku-line); border-radius: 4px; }
+
+/* ---------- ปุ่ม ---------- */
+[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primaryFormSubmit"] {
+    border: 1px solid var(--kku-brick-dark); border-radius: 4px; font-weight: 600;
+}
+[data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-secondaryFormSubmit"],
+[data-testid="stDownloadButton"] button { border-radius: 4px; font-weight: 500; }
+
+/* ---------- กล่องข้อความ / ส่วนขยาย / ฟอร์ม ---------- */
+[data-testid="stAlert"], [data-testid="stExpander"], [data-testid="stForm"] { border-radius: 4px; }
+[data-testid="stForm"] { border: 1px solid var(--kku-line); }
+
+/* ---------- จอแคบ (มือถือ ~375px) ---------- */
+@media (max-width: 640px) {
+    [data-testid="stMainBlockContainer"] { padding: 2.4rem 1rem 1.2rem; }
+    .kku-header { padding: .85rem 1rem; }
+    .kku-header .kku-title { font-size: 1.05rem; }
+    .kku-header .kku-sub { font-size: .75rem; }
+    [data-testid="stMetricValue"] { font-size: 1.25rem; }
+    [data-testid="stTab"] { padding: .5rem .6rem; font-size: .9rem; }
+}
+"""
+    st.markdown(f"<style>@import url('{font_url}');{variables}{css}</style>",
+                unsafe_allow_html=True)
+
+
+def render_header() -> None:
+    """แถบหัวเว็บสีอิฐ (ไม่ใส่ตราหรือโลโก้ของมหาวิทยาลัย)"""
+    st.markdown(
+        '<div class="kku-header">'
+        '<div class="kku-title">ระบบเตือนภัยล่วงหน้านักศึกษาที่เสี่ยงด้านผลการเรียน</div>'
+        '<div class="kku-sub">ต้นแบบโครงงานวิทยาการคอมพิวเตอร์ มหาวิทยาลัยขอนแก่น'
+        ' · ไม่ใช่ระบบทางการของมหาวิทยาลัย</div>'
+        '</div>', unsafe_allow_html=True)
+
+
+def render_footer() -> None:
+    """แถบท้ายหน้า เตือนขอบเขตการใช้งานผลทำนาย"""
+    st.markdown(
+        '<div class="kku-footer">'
+        'ผลการทำนายเป็นสัญญาณเตือนเพื่อสนับสนุนการตัดสินใจของอาจารย์ที่ปรึกษา '
+        'ไม่ใช่ข้อสรุปเกี่ยวกับตัวนักศึกษา'
+        '<div class="kku-note">ผลทำนายอาจมีอคติจากข้อมูลในอดีต '
+        'ควรใช้เพื่อจัดลำดับการเข้าไปช่วยเหลือเท่านั้น '
+        'ไม่ควรใช้ตัดสิทธิ์หรือเปิดเผยต่อบุคคลที่ไม่เกี่ยวข้อง</div>'
+        '</div>', unsafe_allow_html=True)
+
+
+inject_style()
 
 
 # --------------------------------------------------------------- โหลดทรัพยากร
@@ -109,7 +268,7 @@ def factor_chart(expl, row: pd.DataFrame, k: int = 8):
             y=alt.Y("ปัจจัย:N", sort=None, title=None),
             color=alt.Color("ทิศทาง:N", scale=alt.Scale(
                 domain=["เพิ่มความเสี่ยง", "ลดความเสี่ยง"],
-                range=["#D64545", "#2E9E6B"]), legend=alt.Legend(title=None)),
+                range=[RISE_COLOR, FALL_COLOR]), legend=alt.Legend(title=None)),
             tooltip=["ปัจจัย", "ค่าของนักศึกษา",
                      alt.Tooltip("value:Q", title="ค่า SHAP", format="+.3f")],
         ).properties(height=320, width="container",
@@ -119,7 +278,7 @@ def factor_chart(expl, row: pd.DataFrame, k: int = 8):
 
 
 def render_suggestions(factors, row: pd.DataFrame) -> None:
-    st.subheader("💡 ข้อเสนอแนะการช่วยเหลือ")
+    st.subheader("ข้อเสนอแนะการช่วยเหลือ")
     pushers = [(f, v) for f, v in factors if v > 0][:4]
     if not pushers:
         st.success("ไม่พบปัจจัยที่ผลักดันความเสี่ยงอย่างมีนัยสำคัญสำหรับนักศึกษาคนนี้")
@@ -131,21 +290,108 @@ def render_suggestions(factors, row: pd.DataFrame) -> None:
                "โปรดใช้ประกอบดุลยพินิจและข้อมูลจริงของนักศึกษาเสมอ")
 
 
-# ------------------------------------------------------------------- เริ่มโหลด
-bundle = load_model()
-model, features = bundle["model"], bundle["features"]
-default_threshold = float(bundle.get("threshold", 0.5))
-metrics = load_metrics()
+# ------------------------------------------------- ฟังก์ชันช่วยของข้อมูล มข.
+@st.cache_resource(show_spinner=False)
+def load_kku_bundle():
+    """โมเดลที่ฝึกจากข้อมูล มข. จริง (train_kku.py) — ถ้ายังไม่มีคืน None."""
+    return joblib.load(MODEL_KKU_FILE) if os.path.exists(MODEL_KKU_FILE) else None
 
-st.title("🎓 ระบบเตือนภัยล่วงหน้าสำหรับนักศึกษาที่เสี่ยงด้านผลการเรียน")
-st.caption("เครื่องมือสนับสนุนการตัดสินใจของอาจารย์ที่ปรึกษา — "
-           "ผลการทำนายเป็นเพียงสัญญาณเตือน ไม่ใช่ข้อสรุปเกี่ยวกับตัวนักศึกษา")
 
-# ------------------------------------------------------------------- แถบข้างซ้าย
-with st.sidebar:
-    st.info("**เวอร์ชันต้นแบบ** · รายชื่อนักศึกษาเป็นชุดทดสอบสาธารณะ UCI (รหัสสมมติ) · "
-            "ข้อมูลที่กรอกในแท็บ มข. อยู่ในหน่วยความจำของเซสชันเท่านั้น ไม่ถูกบันทึก")
-    st.header("⚙️ การตั้งค่า")
+@st.cache_resource(show_spinner="กำลังเตรียมตัวอธิบายผลของโมเดล มข....")
+def load_kku_explainer(_bundle):
+    return RiskExplainer(_bundle["model"], KKU_FEATURES, _bundle["background"])
+
+
+def kku_factor_chart(fdf: pd.DataFrame, units: str):
+    fdf = fdf.assign(ทิศทาง=np.where(fdf["value"] > 0, "เพิ่มความเสี่ยง", "ลดความเสี่ยง"))
+    return alt.Chart(fdf).mark_bar().encode(
+        x=alt.X("value:Q", title=f"อิทธิพลต่อความเสี่ยง ({units})"),
+        y=alt.Y("ปัจจัย:N", sort=None, title=None),
+        color=alt.Color("ทิศทาง:N", scale=alt.Scale(
+            domain=["เพิ่มความเสี่ยง", "ลดความเสี่ยง"], range=[RISE_COLOR, FALL_COLOR]),
+            legend=alt.Legend(title=None)),
+        tooltip=["ปัจจัย", "ค่า", alt.Tooltip("value:Q", title="ค่า SHAP", format="+.3f")],
+    ).properties(height=300, width="container")
+
+
+def yes_no(v) -> int:
+    return int(v == "ใช่")
+
+
+# ------------------------------------------------- มุมมองผู้ใช้งาน (2 บทบาท)
+VIEW_ADVISOR = "อาจารย์ที่ปรึกษา"
+VIEW_ADMIN = "ผู้ดูแลระบบ"
+TAB_LIST = "รายชื่อนักศึกษาที่ควรติดตาม"
+TAB_PERSON = "รายละเอียดรายบุคคล"
+TAB_MODEL = "ภาพรวมโมเดล"
+TAB_KKU = "ข้อมูลรูปแบบทะเบียน มข."
+
+
+def admin_password() -> str | None:
+    """รหัสผ่านผู้ดูแลระบบจาก .streamlit/secrets.toml — คืน None ถ้ายังไม่ได้ตั้งค่า
+
+    ถ้าไม่มีไฟล์ secrets การอ่าน st.secrets จะโยน error (StreamlitSecretNotFoundError)
+    จึงต้องห่อด้วย try/except เพื่อไม่ให้ทั้งแอปล่ม — ดูแบบไฟล์ที่ .streamlit/secrets.toml.example
+    """
+    try:
+        pw = str(st.secrets["ADMIN_PASSWORD"]).strip()
+    except Exception:
+        return None
+    return pw or None
+
+
+def select_view() -> str:
+    """ตัวเลือกมุมมองบนสุดของแถบข้าง — คืนมุมมองที่ใช้งานได้จริง
+
+    มุมมองผู้ดูแลระบบต้องใส่รหัสผ่านให้ถูกก่อน สถานะเก็บใน st.session_state["admin_ok"]
+    ถ้ายังไม่ผ่าน (หรือยังไม่ได้ตั้งรหัส) จะคืนมุมมองอาจารย์ที่ปรึกษาเสมอ
+    """
+    logged_in = bool(st.session_state.get("admin_ok"))
+    choice = st.radio(
+        "มุมมองการใช้งาน", [VIEW_ADVISOR, VIEW_ADMIN], index=1 if logged_in else 0,
+        help="อาจารย์ที่ปรึกษา: เห็นรายชื่อ ความเสี่ยง เหตุผล และข้อเสนอแนะ · "
+             "ผู้ดูแลระบบ: เห็นผลการเทรนและเครื่องมือปรับแต่งเพิ่ม (ต้องใส่รหัสผ่าน)")
+    if choice == VIEW_ADVISOR:
+        return VIEW_ADVISOR
+
+    if logged_in:
+        st.success("อยู่ในมุมมองผู้ดูแลระบบ")
+        if st.button("ออกจากมุมมองผู้ดูแล"):
+            st.session_state["admin_ok"] = False
+            st.rerun()
+        return VIEW_ADMIN
+
+    pw = admin_password()
+    if pw is None:
+        st.warning("ยังไม่ได้ตั้งรหัสผ่านผู้ดูแลระบบ — คัดลอก `.streamlit/secrets.toml.example` "
+                   "เป็น `.streamlit/secrets.toml` แล้วกำหนด `ADMIN_PASSWORD` · "
+                   "ระหว่างนี้ใช้มุมมองอาจารย์ที่ปรึกษา")
+        return VIEW_ADVISOR
+
+    with st.form("admin_login", clear_on_submit=True):
+        entered = st.text_input("รหัสผ่านผู้ดูแลระบบ", type="password")
+        if st.form_submit_button("เข้าสู่มุมมองผู้ดูแล"):
+            # encode ก่อนเทียบ เพราะ compare_digest ไม่รับ str ที่มีอักขระนอก ASCII (เช่น ภาษาไทย)
+            if hmac.compare_digest(entered.encode("utf-8"), pw.encode("utf-8")):
+                st.session_state["admin_ok"] = True
+                st.rerun()
+            else:
+                st.error("รหัสผ่านไม่ถูกต้อง")
+    return VIEW_ADVISOR
+
+
+def render_sidebar_settings(is_admin: bool) -> tuple[pd.DataFrame, float]:
+    """ส่วนตั้งค่าในแถบข้าง — คืน (ข้อมูลนักศึกษา, เกณฑ์ที่ใช้ตัดสินว่าเสี่ยง)
+
+    มุมมองอาจารย์ที่ปรึกษาจะไม่เห็นตัวอัปโหลด CSV ฟีเจอร์ UCI, สไลเดอร์เกณฑ์ และข้อมูลโมเดล
+    จึงใช้ชุดทดสอบและเกณฑ์ที่จูนไว้ใน bundle คงที่ (ตรรกะการคำนวณเหมือนกันทั้งสองมุมมอง)
+    """
+    if not is_admin:
+        st.caption("ระบบใช้เกณฑ์เตือนที่ผู้ดูแลระบบจูนไว้แล้ว — "
+                   "รายชื่อเรียงจากเสี่ยงมากไปน้อยให้อัตโนมัติ")
+        return load_default_data(), default_threshold
+
+    st.header("สำหรับผู้ดูแลระบบ")
 
     uploaded = st.file_uploader("อัปโหลดข้อมูลนักศึกษา (CSV)", type="csv",
                                 help="ต้องมีคอลัมน์ฟีเจอร์เหมือนชุดข้อมูลที่ใช้เทรน")
@@ -168,7 +414,7 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("ℹ️ ข้อมูลโมเดล")
+    st.subheader("ข้อมูลโมเดล")
     st.write(f"**อัลกอริทึม:** `{bundle.get('model_name', '-')}`")
     st.write(f"**ชุดฟีเจอร์:** `{bundle.get('feature_set', '-')}` ({len(features)} ตัว)")
     st.write(f"**threshold ที่จูนไว้:** `{default_threshold:.3f}`")
@@ -179,6 +425,70 @@ with st.sidebar:
                  f"PR-AUC `{tm.get('pr_auc', 0):.3f}`")
     st.caption("ปรับเกณฑ์ให้เหมาะกับกำลังดูแลของอาจารย์: "
                "ถ้าดูแลได้จำนวนจำกัด ให้เพิ่มเกณฑ์เพื่อโฟกัสรายที่เสี่ยงสุด")
+    return df, threshold
+
+
+# ------------------------------------------------------------------- เริ่มโหลด
+bundle = load_model()
+model, features = bundle["model"], bundle["features"]
+default_threshold = float(bundle.get("threshold", 0.5))
+metrics = load_metrics()
+
+render_header()
+
+
+def configure_database() -> None:
+    """ใช้ PostgreSQL ออนไลน์ถ้าตั้ง DATABASE_URL ใน secrets ไว้ ไม่งั้นใช้ SQLite ในเครื่อง."""
+    try:
+        url = str(st.secrets["DATABASE_URL"]).strip()
+    except Exception:
+        url = ""
+    db.configure(url or None)
+
+
+configure_database()
+
+
+LEVEL_RANK = {"เสี่ยงสูง": 3, "เสี่ยง": 2, "เฝ้าระวัง": 1, "ปกติ": 0}
+LEVEL_ORDER = ["เสี่ยงสูง", "เสี่ยง", "เฝ้าระวัง", "ปกติ"]
+
+
+@st.cache_data(ttl=60, show_spinner="กำลังโหลดนักศึกษาจากฐานข้อมูล...")
+def load_db_students(db_key: str) -> pd.DataFrame:
+    """นักศึกษารูปแบบทะเบียน มข. ทั้งหมดในฐานข้อมูล (db_key แยก cache ตามฐานข้อมูลที่ใช้)."""
+    return db.load_students()
+
+
+@st.cache_data(show_spinner="กำลังประเมินนักศึกษา มข. ทุกภาค...")
+def kku_overview(data: pd.DataFrame, thr: float, model_key: str):
+    """ประเมินทุกคนทุกภาค — model_key เปลี่ยนเมื่อมี/ไม่มีโมเดล มข. เพื่อให้คำนวณใหม่."""
+    return build_timeline(data, model, features, thr, load_train(), load_kku_bundle())
+
+
+kku_bundle = load_kku_bundle()
+try:
+    kku_db = load_db_students(db.describe())
+    db_error = None
+except Exception as e:  # ฐานข้อมูลต่อไม่ได้ → กลับไปใช้ข้อมูลตัวอย่าง UCI
+    kku_db, db_error = pd.DataFrame(), str(e)
+has_kku = len(kku_db) > 0
+
+# ------------------------------------------------------------------- แถบข้างซ้าย
+with st.sidebar:
+    role = select_view()
+    is_admin = role == VIEW_ADMIN
+    use_kku = has_kku
+    if has_kku and is_admin:
+        use_kku = st.radio("แหล่งรายชื่อในแท็บแรก", ["ฐานข้อมูล มข.", "ข้อมูลตัวอย่าง UCI"],
+                           help="อาจารย์ที่ปรึกษาเห็นฐานข้อมูล มข. เสมอเมื่อมีข้อมูล") == "ฐานข้อมูล มข."
+    st.divider()
+    if use_kku:
+        st.info(f"**เวอร์ชันต้นแบบ** · รายชื่อมาจากฐานข้อมูลรูปแบบทะเบียน มข. "
+                f"({kku_db['student_id'].nunique():,} คน) · ใช้รหัสสมมติ")
+    else:
+        st.info("**เวอร์ชันต้นแบบ** · รายชื่อเป็นข้อมูลตัวอย่างสาธารณะ UCI (รหัสสมมติ) · "
+                "ข้อมูลที่กรอกในแท็บ มข. ไม่ถูกบันทึก เว้นแต่ผู้ดูแลระบบกดบันทึกลงฐานข้อมูล")
+    df, threshold = render_sidebar_settings(is_admin)
 
 if ID_COL not in df.columns:
     df = df.copy()
@@ -195,196 +505,320 @@ work["risk"] = proba
 work["band"] = [risk_band(p, threshold) for p in proba]
 
 # ----------------------------------------------------------------- ตัวชี้วัดรวม
-n_total = len(work)
-n_risk = int((work["risk"] >= threshold).sum())
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("นักศึกษาทั้งหมด", f"{n_total:,} คน")
-c2.metric("เข้าเกณฑ์เสี่ยง", f"{n_risk:,} คน", f"{n_risk / max(n_total, 1) * 100:.1f}%")
-c3.metric("เสี่ยงสูง (ควรพบด่วน)", f"{int((work['band'] == 'เสี่ยงสูง').sum()):,} คน")
-if TARGET_COL in work.columns:
-    y = work[TARGET_COL]
-    pred = (work["risk"] >= threshold).astype(int)
-    tp = int(((pred == 1) & (y == 1)).sum())
-    rec = tp / max(int((y == 1).sum()), 1)
-    prec = tp / max(int((pred == 1).sum()), 1)
-    c4.metric("Recall / Precision ที่เกณฑ์นี้", f"{rec:.2f} / {prec:.2f}",
-              help="คำนวณจากข้อมูลชุดนี้ที่มีเฉลยจริง")
+if db_error:
+    st.warning(f"เชื่อมต่อฐานข้อมูลไม่ได้ จึงแสดงข้อมูลตัวอย่างแทน ({db_error[:120]})")
+
+if use_kku:
+    kku_tl, kku_tf, kku_win, kku_src = kku_overview(
+        kku_db, threshold, "kku" if kku_bundle is not None else "uci")
+    kku_latest = kku_tl.groupby(ID_COL, sort=False).tail(1).copy()
+    kku_latest["rank"] = kku_latest["ระดับ"].map(LEVEL_RANK)
+    kku_latest = kku_latest.sort_values(["rank", "model_prob", "gpax"],
+                                        ascending=[False, False, True], na_position="last")
+    st.info(f"**ข้อมูลรูปแบบทะเบียน มข.** จากฐานข้อมูล ({db.describe()}) · "
+            f"ประเมินซ้ำทุกภาค · โมเดล: {'โมเดล มข.' if kku_src == 'kku' else 'โมเดล UCI ชั่วคราว (2 ภาคล่าสุด)'}"
+            " + เกณฑ์จากข้อมูลทะเบียน")
+    n_lv = kku_latest["ระดับ"].value_counts()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("นักศึกษาในฐานข้อมูล", f"{len(kku_latest):,} คน")
+    c2.metric("เสี่ยงสูง (ควรพบด่วน)", f"{int(n_lv.get('เสี่ยงสูง', 0)):,} คน")
+    c3.metric("เสี่ยง", f"{int(n_lv.get('เสี่ยง', 0)):,} คน")
+    c4.metric("เฝ้าระวัง", f"{int(n_lv.get('เฝ้าระวัง', 0)):,} คน")
 else:
-    c4.metric("ค่าความเสี่ยงเฉลี่ย", f"{work['risk'].mean() * 100:.1f}%")
-
-tab_list, tab_person, tab_model, tab_kku = st.tabs(
-    ["📋 รายชื่อกลุ่มเสี่ยง", "🔍 อธิบายรายบุคคล", "📊 ภาพรวมโมเดล", "🏫 ข้อมูลจริง มข."])
-
-# ------------------------------------------------------------ แท็บ 1: รายชื่อ
-with tab_list:
-    f1, f2, f3 = st.columns([2, 2, 3])
-    bands = f1.multiselect("ระดับความเสี่ยง", list(BAND_COLORS),
-                           default=["เสี่ยงสูง", "เสี่ยงปานกลาง"])
-    if "Course" in work.columns:
-        codes = sorted(work["Course"].unique())
-        chosen = f2.multiselect(
-            "สาขาวิชา", codes, default=[],
-            format_func=lambda c: f"{decode_value('Course', c)} ({c})")
-    else:
-        chosen = []
-    query = f3.text_input("ค้นหารหัสนักศึกษา", placeholder="เช่น S0123")
-
-    view = work[work["band"].isin(bands)] if bands else work
-    if chosen:
-        view = view[view["Course"].isin(chosen)]
-    if query:
-        view = view[view[ID_COL].astype(str).str.contains(query.strip(), case=False)]
-    view = view.sort_values("risk", ascending=False)
-
-    highlight_cols = [c for c in [
-        "pass_rate_1st", "Curricular units 1st sem (approved)",
-        "Curricular units 1st sem (grade)", "pass_rate_2nd",
-        "Tuition fees up to date", "Debtor", "Scholarship holder",
-        "Age at enrollment", "Course",
-    ] if c in view.columns]
-
-    table = pd.DataFrame({
-        "รหัสนักศึกษา": view[ID_COL],
-        "ความเสี่ยง (%)": (view["risk"] * 100).round(1),
-        "ระดับ": view["band"],
-    })
-    for c in highlight_cols:
-        col = view[c]
-        table[label_th(c)] = (
-            col.map(lambda v: decode_value(c, v))
-            if c in ("Course", "Tuition fees up to date", "Debtor", "Scholarship holder")
-            else col.round(2)
-        )
-    if TARGET_COL in view.columns:
-        table["ผลจริง (ข้อมูลย้อนหลัง)"] = view[TARGET_COL].map({1: "หลุดจากระบบ", 0: "ยังเรียนอยู่"})
-
-    st.write(f"พบ **{len(view):,}** คนตามเงื่อนไข (เรียงจากเสี่ยงมากไปน้อย)")
-    st.dataframe(
-        table, hide_index=True, height=430,
-        column_config={"ความเสี่ยง (%)": st.column_config.ProgressColumn(
-            "ความเสี่ยง (%)", min_value=0, max_value=100, format="%.1f%%")},
-    )
-    st.download_button(
-        "⬇️ ดาวน์โหลดรายชื่อ (CSV)",
-        table.to_csv(index=False).encode("utf-8-sig"),
-        file_name="at_risk_students.csv", mime="text/csv",
-    )
-
-# -------------------------------------------------------- แท็บ 2: รายบุคคล
-with tab_person:
-    ranked = work.sort_values("risk", ascending=False)
-    options = ranked[ID_COL].tolist()
-    sid = st.selectbox(
-        "เลือกนักศึกษา (เรียงตามความเสี่ยง)", options,
-        format_func=lambda s: (
-            f"{s} — {ranked.loc[ranked[ID_COL] == s, 'risk'].iloc[0] * 100:.1f}% "
-            f"({ranked.loc[ranked[ID_COL] == s, 'band'].iloc[0]})"),
-    )
-    row = work[work[ID_COL] == sid]
-    p = float(row["risk"].iloc[0])
-    band = row["band"].iloc[0]
-
-    left, right = st.columns([1, 2])
-    with left:
-        st.metric("ระดับความเสี่ยง", f"{p * 100:.1f}%", band)
-        st.progress(min(p, 1.0))
-        st.caption(f"เกณฑ์ปัจจุบัน: {threshold:.2f} — "
-                   f"{'เข้าเกณฑ์ต้องติดตาม' if p >= threshold else 'ยังไม่เข้าเกณฑ์'}")
-        for c in ("Course", "Age at enrollment", "Tuition fees up to date",
-                  "Debtor", "Scholarship holder"):
-            if c in row.columns:
-                st.write(f"**{label_th(c)}:** {decode_value(c, row[c].iloc[0])}")
-
-    with right:
-        expl = load_explainer(model, tuple(features))
-        chart, factors = factor_chart(expl, row)
-        st.altair_chart(chart)
-
-    render_suggestions(factors, row)
-
-# ------------------------------------------------------- แท็บ 3: ภาพรวมโมเดล
-with tab_model:
-    col_a, col_b = st.columns([3, 2])
-    with col_a:
-        st.subheader("ปัจจัยสำคัญระดับภาพรวม (mean |SHAP|)")
-        expl = load_explainer(model, tuple(features))
-        imp = global_importance(expl, df, tuple(features))
-        idf = pd.DataFrame({"ปัจจัย": [label_th(i) for i in imp.index],
-                            "ความสำคัญ": imp.values})
-        st.altair_chart(
-            alt.Chart(idf).mark_bar(color="#4C78A8").encode(
-                x=alt.X("ความสำคัญ:Q", title=f"mean |SHAP| ({expl.units})"),
-                y=alt.Y("ปัจจัย:N", sort="-x", title=None),
-                tooltip=["ปัจจัย", alt.Tooltip("ความสำคัญ:Q", format=".3f")],
-            ).properties(height=420, width="container"))
-
-    with col_b:
-        st.subheader("การกระจายของความเสี่ยง")
-        dist = work[["risk", "band"]]
-        if len(dist) > 5000:  # ข้อจำกัดจำนวนแถวของ Altair
-            dist = dist.sample(5000, random_state=42)
-        st.altair_chart(
-            alt.Chart(dist).mark_bar().encode(
-                x=alt.X("risk:Q", bin=alt.Bin(maxbins=25),
-                        title="ความน่าจะเป็นที่จะเสี่ยง"),
-                y=alt.Y("count():Q", title="จำนวนนักศึกษา"),
-                color=alt.Color("band:N", scale=alt.Scale(
-                    domain=list(BAND_COLORS), range=list(BAND_COLORS.values())),
-                    legend=alt.Legend(title="ระดับ")),
-            ).properties(height=260, width="container"))
-
-        if metrics:
-            st.subheader("ผลเปรียบเทียบโมเดล (5-fold CV)")
-            rows = [{"โมเดล": name, "PR-AUC": r["cv"]["pr_auc"],
-                     "ROC-AUC": r["cv"]["roc_auc"], "Recall@0.5": r["cv"]["recall"]}
-                    for name, r in metrics.get("cv_results", {}).items()]
-            st.dataframe(pd.DataFrame(rows).sort_values("PR-AUC", ascending=False),
-                         hide_index=True)
-
-    if TARGET_COL in work.columns:
-        st.subheader(f"ตารางความสับสน (confusion matrix) ที่เกณฑ์ {threshold:.2f}")
+    st.info("**ข้อมูลตัวอย่างสาธารณะ** · รายชื่อด้านล่างมาจากชุดข้อมูล UCI "
+            "(มหาวิทยาลัยในประเทศโปรตุเกส) ใช้สาธิตการทำงานของระบบ ไม่ใช่นักศึกษา มข."
+            + ("" if has_kku else " · ยังไม่มีนักศึกษา มข. ในฐานข้อมูล "
+               "(ผู้ดูแลระบบเพิ่มได้ที่แท็บข้อมูลรูปแบบทะเบียน มข.)"))
+    n_total = len(work)
+    n_risk = int((work["risk"] >= threshold).sum())
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("นักศึกษาทั้งหมด", f"{n_total:,} คน")
+    c2.metric("เข้าเกณฑ์เสี่ยง", f"{n_risk:,} คน", f"{n_risk / max(n_total, 1) * 100:.1f}%")
+    c3.metric("เสี่ยงสูง (ควรพบด่วน)", f"{int((work['band'] == 'เสี่ยงสูง').sum()):,} คน")
+    if is_admin and TARGET_COL in work.columns:
         y = work[TARGET_COL]
         pred = (work["risk"] >= threshold).astype(int)
-        cm = pd.DataFrame(
-            [[int(((pred == 0) & (y == 0)).sum()), int(((pred == 1) & (y == 0)).sum())],
-             [int(((pred == 0) & (y == 1)).sum()), int(((pred == 1) & (y == 1)).sum())]],
-            index=["จริง: ไม่เสี่ยง", "จริง: เสี่ยง"],
-            columns=["ทาย: ไม่เสี่ยง", "ทาย: เสี่ยง"])
-        st.dataframe(cm)
-        st.caption("ช่อง 'จริง: เสี่ยง / ทาย: ไม่เสี่ยง' คือนักศึกษาที่ระบบพลาด — "
-                   "ลดเกณฑ์เพื่อให้พลาดน้อยลง แลกกับการแจ้งเตือนเกินจริงที่มากขึ้น")
+        tp = int(((pred == 1) & (y == 1)).sum())
+        rec = tp / max(int((y == 1).sum()), 1)
+        prec = tp / max(int((pred == 1).sum()), 1)
+        c4.metric("Recall / Precision ที่เกณฑ์นี้", f"{rec:.2f} / {prec:.2f}",
+                  help="คำนวณจากข้อมูลชุดนี้ที่มีเฉลยจริง")
+    else:
+        c4.metric("ค่าความเสี่ยงเฉลี่ย", f"{work['risk'].mean() * 100:.1f}%")
+
+
+# แท็บ "ภาพรวมโมเดล" เป็นผลการเทรน จึงมีเฉพาะมุมมองผู้ดูแลระบบ (อาจารย์เห็น 3 แท็บ)
+tab_names = [TAB_LIST, TAB_PERSON] + ([TAB_MODEL] if is_admin else []) + [TAB_KKU]
+tabs = dict(zip(tab_names, st.tabs(tab_names)))
+
+# ------------------------------------------------------------ แท็บ 1: รายชื่อ
+with tabs[TAB_LIST]:
+    if use_kku:
+        f1, f2 = st.columns([3, 3])
+        lv_pick = f1.multiselect("ระดับล่าสุด", LEVEL_ORDER, default=LEVEL_ORDER)
+        query = f2.text_input("ค้นหารหัสนักศึกษา", placeholder="เช่น KKU-001")
+        view = kku_latest[kku_latest["ระดับ"].isin(lv_pick)] if lv_pick else kku_latest
+        if query:
+            view = view[view[ID_COL].astype(str).str.contains(query.strip(), case=False)]
+        table = pd.DataFrame({
+            "รหัสนักศึกษา": view[ID_COL],
+            "ภาคล่าสุด": view["ภาค"],
+            "ระดับล่าสุด": view["ระดับ"],
+            "GPAX": view["gpax"],
+            "หน่วยกิตสะสม": view["cp_cum"],
+            "ช้ากว่าแผน": view["credits_behind"],
+            "โมเดล (%)": (view["model_prob"] * 100).round(1),
+            "เตือนครั้งแรก": [first_alert(kku_tl, s_) or "—" for s_ in view[ID_COL]],
+            "เหตุผล": view["เหตุผล"],
+        })
+        st.write(f"พบ **{len(view):,}** คนตามเงื่อนไข (เรียงจากระดับล่าสุดที่รุนแรงที่สุด)")
+        st.dataframe(
+            table, hide_index=True, height=430,
+            column_config={
+                "GPAX": st.column_config.NumberColumn(format="%.2f"),
+                "โมเดล (%)": st.column_config.ProgressColumn(
+                    "โมเดล (%)", min_value=0, max_value=100, format="%.1f%%"),
+                "เหตุผล": st.column_config.TextColumn(width="large")})
+        st.download_button(
+            "ดาวน์โหลดรายชื่อ (CSV)",
+            table.to_csv(index=False).encode("utf-8-sig"),
+            file_name="kku_students_to_follow.csv", mime="text/csv")
+    else:
+        st.caption("ข้อมูลตัวอย่างสาธารณะ (UCI) · ใช้สาธิตการทำงาน")
+        f1, f2, f3 = st.columns([2, 2, 3])
+        bands = f1.multiselect("ระดับความเสี่ยง", list(BAND_COLORS),
+                               default=["เสี่ยงสูง", "เสี่ยงปานกลาง"])
+        if "Course" in work.columns:
+            codes = sorted(work["Course"].unique())
+            chosen = f2.multiselect(
+                "สาขาวิชา", codes, default=[],
+                format_func=lambda c: f"{decode_value('Course', c)} ({c})")
+        else:
+            chosen = []
+        query = f3.text_input("ค้นหารหัสนักศึกษา", placeholder="เช่น S0123")
+
+        view = work[work["band"].isin(bands)] if bands else work
+        if chosen:
+            view = view[view["Course"].isin(chosen)]
+        if query:
+            view = view[view[ID_COL].astype(str).str.contains(query.strip(), case=False)]
+        view = view.sort_values("risk", ascending=False)
+
+        highlight_cols = [c for c in [
+            "pass_rate_1st", "Curricular units 1st sem (approved)",
+            "Curricular units 1st sem (grade)", "pass_rate_2nd",
+            "Tuition fees up to date", "Debtor", "Scholarship holder",
+            "Age at enrollment", "Course",
+        ] if c in view.columns]
+
+        table = pd.DataFrame({
+            "รหัสนักศึกษา": view[ID_COL],
+            "ความเสี่ยง (%)": (view["risk"] * 100).round(1),
+            "ระดับ": view["band"],
+        })
+        for c in highlight_cols:
+            col = view[c]
+            table[label_th(c)] = (
+                col.map(lambda v: decode_value(c, v))
+                if c in ("Course", "Tuition fees up to date", "Debtor", "Scholarship holder")
+                else col.round(2)
+            )
+        if TARGET_COL in view.columns:
+            table["ผลจริง (ข้อมูลย้อนหลัง)"] = view[TARGET_COL].map({1: "หลุดจากระบบ", 0: "ยังเรียนอยู่"})
+
+        st.write(f"พบ **{len(view):,}** คนตามเงื่อนไข (เรียงจากเสี่ยงมากไปน้อย)")
+        st.dataframe(
+            table, hide_index=True, height=430,
+            column_config={"ความเสี่ยง (%)": st.column_config.ProgressColumn(
+                "ความเสี่ยง (%)", min_value=0, max_value=100, format="%.1f%%")},
+        )
+        st.download_button(
+            "ดาวน์โหลดรายชื่อ (CSV)",
+            table.to_csv(index=False).encode("utf-8-sig"),
+            file_name="at_risk_students.csv", mime="text/csv",
+        )
+
+# -------------------------------------------------------- แท็บ 2: รายบุคคล
+with tabs[TAB_PERSON]:
+    if use_kku:
+        opts = kku_latest[ID_COL].tolist()
+        lv_of = dict(zip(kku_latest[ID_COL], kku_latest["ระดับ"]))
+        term_of = dict(zip(kku_latest[ID_COL], kku_latest["ภาค"]))
+        sid = st.selectbox("เลือกนักศึกษา (เรียงตามระดับล่าสุด)", opts,
+                           format_func=lambda s_: f"{s_} — {lv_of[s_]} ({term_of[s_]})")
+        tl_one = kku_tl[kku_tl[ID_COL] == sid]
+        tf_one = kku_tf[kku_tf["student_id"] == sid].reset_index(drop=True)
+        cur = tl_one.iloc[-1]
+        prof = tf_one.iloc[-1]
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("ระดับล่าสุด", cur["ระดับ"], cur["ภาค"], delta_color="off")
+        m2.metric("GPAX ล่าสุด", f"{cur['gpax']:.2f}")
+        m3.metric("หน่วยกิตสะสม", f"{cur['cp_cum']} / {int(prof['required_credits'])}",
+                  f"ช้ากว่าแผน {cur['credits_behind']}" if cur["credits_behind"] else "ตามแผน",
+                  delta_color="inverse" if cur["credits_behind"] else "off")
+        m4.metric("เตือนครั้งแรก", first_alert(kku_tl, sid) or "ยังไม่เคย")
+
+        order = tl_one["ภาค"].tolist()
+        st.altair_chart(alt.Chart(tl_one).mark_bar().encode(
+            x=alt.X("ภาค:N", sort=order, title=None),
+            y=alt.Y("model_prob:Q", scale=alt.Scale(domain=[0, 1]),
+                    axis=alt.Axis(format="%"), title="ความเสี่ยงจากโมเดล"),
+            color=alt.Color("ระดับ:N", scale=alt.Scale(
+                domain=list(LEVEL_PALETTE), range=list(LEVEL_PALETTE.values())),
+                legend=alt.Legend(title="ระดับรวม", orient="bottom")),
+            tooltip=["ภาค", "ระดับ", alt.Tooltip("model_prob:Q", format=".0%"), "เหตุผล"],
+        ).properties(height=220, width="container", title="ระดับความเสี่ยงรายภาค"))
+        st.dataframe(
+            tl_one[["ภาค", "gpa", "gpax", "n_f", "n_w", "term_result", "ระดับ", "เหตุผล"]].rename(
+                columns={"gpa": "GPA", "gpax": "GPAX", "n_f": "F", "n_w": "W",
+                         "term_result": "ผลการศึกษา (ทะเบียน)"}),
+            hide_index=True,
+            column_config={"GPA": st.column_config.NumberColumn(format="%.2f"),
+                           "GPAX": st.column_config.NumberColumn(format="%.2f"),
+                           "เหตุผล": st.column_config.TextColumn(width="large")})
+
+        st.markdown(f"**ปัจจัยที่โมเดลให้น้ำหนักในภาคล่าสุด ({cur['ภาค']})**")
+        tips = []
+        if kku_src == "kku":
+            kexpl = load_kku_explainer(kku_bundle)
+            krow = tf_one.iloc[[-1]]
+            facs = kexpl.top_factors(krow[KKU_FEATURES], k=8)
+            fdf = pd.DataFrame([{"feature": f, "ปัจจัย": KKU_FEATURE_LABELS.get(f, f),
+                                 "ค่า": str(krow[f].iloc[0]), "value": v} for f, v in facs])
+            st.altair_chart(kku_factor_chart(fdf, kexpl.units))
+            tips = [(r.ปัจจัย, r.ค่า, KKU_INTERVENTIONS.get(r.feature, GENERIC_INTERVENTION))
+                    for r in fdf.itertuples() if r.value > 0][:4]
+        else:
+            wrow = kku_win[(kku_win[ID_COL] == sid) & (kku_win["term_no"] == cur["term_no"])]
+            if wrow.empty:
+                st.caption("ต้องมีอย่างน้อย 2 ภาคจึงจะใช้โมเดลได้")
+            else:
+                uexpl = load_explainer(model, tuple(features))
+                sv = uexpl.shap_values(wrow[features]).iloc[0]
+                fdf, filled = factors_in_kku_terms(sv, tf_one.iloc[-2], tf_one.iloc[-1])
+                st.altair_chart(kku_factor_chart(fdf.head(8), uexpl.units))
+                st.caption("แสดงเฉพาะปัจจัยที่มาจากข้อมูล มข. จริง · ฟีเจอร์ของชุด UCI ที่ มข. "
+                           f"ไม่มีถูกเติมค่าคงที่ (รวมกันมีผล {filled:+.3f}) และไม่นำมาตีความ")
+                tips = [(r.ปัจจัย, r.ค่า, suggest(r.feature))
+                        for r in fdf.itertuples() if r.value > 0][:4]
+        if tips:
+            st.subheader("ข้อเสนอแนะการช่วยเหลือ")
+            for name, val, tip in tips:
+                st.markdown(f"- **{name}** (ค่า: {val}) → {tip}")
+    else:
+        st.caption("ข้อมูลตัวอย่างสาธารณะ (UCI) · ใช้สาธิตการทำงาน")
+        ranked = work.sort_values("risk", ascending=False)
+        options = ranked[ID_COL].tolist()
+        sid = st.selectbox(
+            "เลือกนักศึกษา (เรียงตามความเสี่ยง)", options,
+            format_func=lambda s: (
+                f"{s} — {ranked.loc[ranked[ID_COL] == s, 'risk'].iloc[0] * 100:.1f}% "
+                f"({ranked.loc[ranked[ID_COL] == s, 'band'].iloc[0]})"),
+        )
+        row = work[work[ID_COL] == sid]
+        p = float(row["risk"].iloc[0])
+        band = row["band"].iloc[0]
+
+        left, right = st.columns([1, 2])
+        with left:
+            st.metric("ระดับความเสี่ยง", f"{p * 100:.1f}%", band)
+            st.progress(min(p, 1.0))
+            st.caption(f"เกณฑ์ปัจจุบัน: {threshold:.2f} — "
+                       f"{'เข้าเกณฑ์ต้องติดตาม' if p >= threshold else 'ยังไม่เข้าเกณฑ์'}")
+            for c in ("Course", "Age at enrollment", "Tuition fees up to date",
+                      "Debtor", "Scholarship holder"):
+                if c in row.columns:
+                    st.write(f"**{label_th(c)}:** {decode_value(c, row[c].iloc[0])}")
+
+        with right:
+            expl = load_explainer(model, tuple(features))
+            chart, factors = factor_chart(expl, row)
+            st.altair_chart(chart)
+
+        render_suggestions(factors, row)
+
+# ------------------------------------- แท็บ 3: ภาพรวมโมเดล (เฉพาะผู้ดูแลระบบ)
+if TAB_MODEL in tabs:
+    with tabs[TAB_MODEL]:
+        col_a, col_b = st.columns([3, 2])
+        with col_a:
+            st.subheader("ปัจจัยสำคัญระดับภาพรวม (mean |SHAP|)")
+            expl = load_explainer(model, tuple(features))
+            imp = global_importance(expl, df, tuple(features))
+            idf = pd.DataFrame({"ปัจจัย": [label_th(i) for i in imp.index],
+                                "ความสำคัญ": imp.values})
+            st.altair_chart(
+                alt.Chart(idf).mark_bar(color=STEEL).encode(
+                    x=alt.X("ความสำคัญ:Q", title=f"mean |SHAP| ({expl.units})"),
+                    y=alt.Y("ปัจจัย:N", sort="-x", title=None),
+                    tooltip=["ปัจจัย", alt.Tooltip("ความสำคัญ:Q", format=".3f")],
+                ).properties(height=420, width="container"))
+
+        with col_b:
+            st.subheader("การกระจายของความเสี่ยง")
+            dist = work[["risk", "band"]]
+            if len(dist) > 5000:  # ข้อจำกัดจำนวนแถวของ Altair
+                dist = dist.sample(5000, random_state=42)
+            st.altair_chart(
+                alt.Chart(dist).mark_bar().encode(
+                    x=alt.X("risk:Q", bin=alt.Bin(maxbins=25),
+                            title="ความน่าจะเป็นที่จะเสี่ยง"),
+                    y=alt.Y("count():Q", title="จำนวนนักศึกษา"),
+                    color=alt.Color("band:N", scale=alt.Scale(
+                        domain=list(BAND_COLORS), range=list(BAND_COLORS.values())),
+                        legend=alt.Legend(title="ระดับ")),
+                ).properties(height=260, width="container"))
+
+            if metrics:
+                st.subheader("ผลเปรียบเทียบโมเดล (5-fold CV)")
+                rows = [{"โมเดล": name, "PR-AUC": r["cv"]["pr_auc"],
+                         "ROC-AUC": r["cv"]["roc_auc"], "Recall@0.5": r["cv"]["recall"]}
+                        for name, r in metrics.get("cv_results", {}).items()]
+                st.dataframe(pd.DataFrame(rows).sort_values("PR-AUC", ascending=False),
+                             hide_index=True)
+
+        labeled = work[work[TARGET_COL].notna()] if TARGET_COL in work.columns else work.iloc[0:0]
+        if len(labeled):
+            y = labeled[TARGET_COL].astype(int)
+            pred = (labeled["risk"] >= threshold).astype(int)
+            tn = int(((pred == 0) & (y == 0)).sum())
+            fp = int(((pred == 1) & (y == 0)).sum())
+            fn = int(((pred == 0) & (y == 1)).sum())
+            tp = int(((pred == 1) & (y == 1)).sum())
+            c1, c2 = st.columns([2, 3])
+            with c1:
+                st.subheader(f"ตารางความสับสน ที่เกณฑ์ {threshold:.2f}")
+                st.dataframe(pd.DataFrame(
+                    [[f"TN = {tn}", f"FP = {fp} (เตือนเกิน)"],
+                     [f"FN = {fn} (พลาด)", f"TP = {tp}"]],
+                    index=["จริง: ไม่เสี่ยง", "จริง: เสี่ยง"],
+                    columns=["ทาย: ไม่เสี่ยง", "ทาย: เสี่ยง"]))
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Recall", f"{tp / max(tp + fn, 1):.2f}")
+                m2.metric("Precision", f"{tp / max(tp + fp, 1):.2f}")
+                m3.metric("Accuracy", f"{(tp + tn) / max(len(y), 1):.2f}")
+                st.caption("ลดเกณฑ์ → FN น้อยลง (พลาดน้อย) แต่ FP มากขึ้น (เตือนเกิน)")
+            with c2:
+                st.subheader("ถ้าระบบบอกระดับนี้ เสี่ยงจริงกี่ %")
+                order = list(BAND_COLORS)
+                bt = (labeled.assign(y=y).groupby("band")["y"]
+                      .agg(["size", "sum"]).reindex(order).fillna(0))
+                st.dataframe(pd.DataFrame({
+                    "ระดับที่ระบบแจ้ง": order,
+                    "จำนวน": bt["size"].astype(int).values,
+                    "เสี่ยงจริง": bt["sum"].astype(int).values,
+                    "P(เสี่ยงจริง | ระดับ)": [100 * s / n if n else None
+                                              for s, n in zip(bt["sum"], bt["size"])],
+                }), hide_index=True, column_config={
+                    "P(เสี่ยงจริง | ระดับ)": st.column_config.ProgressColumn(
+                        min_value=0, max_value=100, format="%.1f%%")})
+                st.caption(f"ภาพรวมทั้งกลุ่มเสี่ยงจริง {y.mean():.0%} · "
+                           "ระดับที่สูงกว่าควรมีสัดส่วนเสี่ยงจริงสูงกว่า จึงใช้จัดลำดับการติดตามได้")
 
 # --------------------------------------------------- แท็บ 4: ข้อมูลจริง มข.
-@st.cache_resource(show_spinner=False)
-def load_kku_bundle():
-    """โมเดลที่ฝึกจากข้อมูล มข. จริง (train_kku.py) — ถ้ายังไม่มีคืน None."""
-    return joblib.load(MODEL_KKU_FILE) if os.path.exists(MODEL_KKU_FILE) else None
-
-
-@st.cache_resource(show_spinner="กำลังเตรียมตัวอธิบายผลของโมเดล มข....")
-def load_kku_explainer(_bundle):
-    return RiskExplainer(_bundle["model"], KKU_FEATURES, _bundle["background"])
-
-
-def kku_factor_chart(fdf: pd.DataFrame, units: str):
-    fdf = fdf.assign(ทิศทาง=np.where(fdf["value"] > 0, "เพิ่มความเสี่ยง", "ลดความเสี่ยง"))
-    return alt.Chart(fdf).mark_bar().encode(
-        x=alt.X("value:Q", title=f"อิทธิพลต่อความเสี่ยง ({units})"),
-        y=alt.Y("ปัจจัย:N", sort=None, title=None),
-        color=alt.Color("ทิศทาง:N", scale=alt.Scale(
-            domain=["เพิ่มความเสี่ยง", "ลดความเสี่ยง"], range=["#D64545", "#2E9E6B"]),
-            legend=alt.Legend(title=None)),
-        tooltip=["ปัจจัย", "ค่า", alt.Tooltip("value:Q", title="ค่า SHAP", format="+.3f")],
-    ).properties(height=300, width="container")
-
-
-def yes_no(v) -> int:
-    return int(v == "ใช่")
-
-
-with tab_kku:
+with tabs[TAB_KKU]:
     kku_bundle = load_kku_bundle()
-    st.subheader("🏫 ข้อมูลจริงตามระบบทะเบียน มข. — ประเมินทุกภาค")
+    st.subheader("ข้อมูลตามระบบทะเบียน มข. — ประเมินทุกภาค")
     if kku_bundle is None:
         st.caption(
             "ใช้ข้อมูลตามทะเบียน มข. (CR, CP, GPA, GPAX, F, W, ผลการศึกษารายภาค, ค้างชำระ, ค่าปรับ, "
@@ -397,15 +831,15 @@ with tab_kku:
             f"({kku_bundle['n_rows']} ตัวอย่างคน×ภาค) · ทำนายล่วงหน้า {kku_bundle['horizon']} ภาค · "
             f"PR-AUC (CV) {kku_bundle['cv_metrics']['pr_auc']:.3f}")
 
-    with st.expander("📖 ข้อมูล มข. ที่ระบบใช้ (พจนานุกรมข้อมูล)"):
+    with st.expander("ข้อมูล มข. ที่ระบบใช้ (พจนานุกรมข้อมูล)"):
         ddf = dictionary_df()
         st.dataframe(ddf, hide_index=True)
         st.caption(f"ทั้งหมด {len(ddf)} ฟิลด์ · เข้าโมเดล UCI ได้ {int((ddf['โมเดล UCI'] == '✓').sum())} · "
                    f"ใช้ในกฎเตือนภัย {int((ddf['กฎเตือนภัย'] == '✓').sum())} · "
                    f"ใช้ในโมเดล มข. {int((ddf['โมเดล มข.'] == '✓').sum())}")
 
-    mode = st.radio("วิธีนำเข้า", ["กรอกทีละคน", "อัปโหลดไฟล์ CSV รูปแบบทะเบียน"],
-                    horizontal=True)
+    mode = st.radio("วิธีนำเข้า", ["กรอกทีละคน", "อัปโหลดไฟล์ CSV รูปแบบทะเบียน",
+                                   "ข้อมูลที่บันทึกในฐานข้อมูล"], horizontal=True)
 
     if mode == "กรอกทีละคน":
         tpl = kku_template_df()
@@ -508,7 +942,7 @@ with tab_kku:
 
     elif mode == "อัปโหลดไฟล์ CSV รูปแบบทะเบียน":
         st.download_button(
-            "⬇️ ไฟล์ตัวอย่าง (1 แถว = 1 คน × 1 ภาค)",
+            "ไฟล์ตัวอย่าง (1 แถว = 1 คน × 1 ภาค)",
             kku_template_df().to_csv(index=False).encode("utf-8-sig"),
             file_name="kku_template_terms.csv", mime="text/csv")
         st.caption("คอลัมน์บังคับดูได้จากพจนานุกรมข้อมูลด้านบน คอลัมน์อื่นเว้นว่างได้ · "
@@ -519,6 +953,52 @@ with tab_kku:
         up = st.file_uploader("อัปโหลดไฟล์ CSV", type="csv", key="kku_upload")
         if up is not None:
             st.session_state["kku_preview"] = pd.read_csv(up)
+
+    else:
+        try:
+            saved = db.list_students()
+        except Exception as e:  # ฐานข้อมูลเสียหรือเปิดไม่ได้ ต้องไม่ทำให้ทั้งแอปล่ม
+            saved = None
+            st.error(f"เปิดฐานข้อมูลไม่ได้: {e}")
+        if saved is not None and saved.empty:
+            st.info("ยังไม่มีข้อมูลในฐานข้อมูล · กรอกหรืออัปโหลด แล้วกด \"บันทึกลงฐานข้อมูล\" ด้านล่างผลประเมิน")
+        elif saved is not None:
+            st.dataframe(saved.rename(columns={
+                "student_id": "รหัส", "status": "สถานภาพ", "source": "ที่มา",
+                "consent": "ยินยอม", "updated_at": "แก้ไขล่าสุด", "n_terms": "จำนวนภาค",
+                "last_term": "ภาคล่าสุด", "last_level": "ระดับที่ประเมินล่าสุด"}),
+                hide_index=True)
+            pick = st.multiselect("เลือกนักศึกษา", saved["student_id"].tolist(),
+                                  default=saved["student_id"].tolist()[:1])
+            c1, c2, c3 = st.columns(3)
+            if c1.button("เปิดประเมิน", type="primary", disabled=not pick):
+                st.session_state["kku_preview"] = db.load_students(pick)
+                st.rerun()
+            if is_admin:
+                c2.download_button(
+                    "ส่งออกทั้งหมด (CSV)",
+                    db.load_students().to_csv(index=False).encode("utf-8-sig"),
+                    file_name="kku_database_export.csv", mime="text/csv")
+                if c3.button("ลบที่เลือกออกจากฐานข้อมูล", disabled=not pick):
+                    for sid in pick:
+                        db.delete_student(sid)
+                    load_db_students.clear()
+                    st.session_state.pop("kku_preview", None)
+                    st.rerun()
+            if pick:
+                with st.expander("ประวัติการประเมินที่บันทึกไว้"):
+                    hist = pd.concat([db.assessment_history(sid) for sid in pick],
+                                     ignore_index=True)
+                    st.dataframe(hist.rename(columns={
+                        "student_id": "รหัส", "term_no": "ภาค", "risk_level": "ระดับ",
+                        "risk_score": "ความน่าจะเป็น", "model_source": "โมเดล",
+                        "threshold": "เกณฑ์", "reasons": "เหตุผล",
+                        "assessed_at": "ประเมินเมื่อ"}), hide_index=True)
+        db_note = ("ข้อมูลอยู่ถาวรบนฐานข้อมูลออนไลน์" if db.is_online()
+                   else "บนเว็บเดโม ไฟล์ SQLite จะหายเมื่อแอปรีสตาร์ท")
+        st.caption(f"ฐานข้อมูล: {db.describe()} · ตาราง STUDENT, TERM_RECORD, RISK_ASSESSMENT "
+                   f"ตามแผนภาพ ER · {db_note}"
+                   + ("" if is_admin else " · การบันทึก ส่งออก และลบ ทำได้ในมุมมองผู้ดูแลระบบ"))
 
 
     preview = st.session_state.get("kku_preview")
@@ -583,7 +1063,7 @@ with tab_kku:
                     color=alt.Color("ชนิด:N", legend=alt.Legend(title=None, orient="bottom")),
                     tooltip=["ภาค", "ชนิด", alt.Tooltip("ค่า:Q", format=".2f")]),
                 alt.Chart(pd.DataFrame({"y": [PROBATION_GPAX]})).mark_rule(
-                    color="#D64545", strokeDash=[4, 4]).encode(y="y:Q"),
+                    color=RISE_COLOR, strokeDash=[4, 4]).encode(y="y:Q"),
             ).properties(height=240, width="container", title="GPA / GPAX (เส้นประ = 2.00)")
             plan = tfs["required_credits"] / tfs["plan_terms"] * tfs["term_no"]
             cdf = pd.concat([
@@ -592,7 +1072,7 @@ with tab_kku:
             c_chart = alt.Chart(cdf).mark_line(point=True).encode(
                 x=alt.X("ภาค:N", sort=order, title=None),
                 y=alt.Y("หน่วยกิต:Q", title=None),
-                color=alt.Color("ชนิด:N", scale=alt.Scale(range=["#2E9E6B", "#999"]),
+                color=alt.Color("ชนิด:N", scale=alt.Scale(range=[FALL_COLOR, MUTED]),
                                 legend=alt.Legend(title=None, orient="bottom")),
                 strokeDash=alt.StrokeDash("ชนิด:N", legend=None),
                 tooltip=["ภาค", "ชนิด", "หน่วยกิต"],
@@ -602,7 +1082,7 @@ with tab_kku:
                 y=alt.Y("model_prob:Q", scale=alt.Scale(domain=[0, 1]),
                         axis=alt.Axis(format="%"), title=None),
                 color=alt.Color("ระดับ:N", scale=alt.Scale(
-                    domain=list(LEVEL_COLORS), range=list(LEVEL_COLORS.values())),
+                    domain=list(LEVEL_PALETTE), range=list(LEVEL_PALETTE.values())),
                     legend=alt.Legend(title=None, orient="bottom")),
                 tooltip=["ภาค", "ระดับ", alt.Tooltip("model_prob:Q", format=".0%"), "เหตุผล"],
             ).properties(height=240, width="container",
@@ -653,16 +1133,16 @@ with tab_kku:
                     tips = [(r.ปัจจัย, r.ค่า, suggest(r.feature))
                             for r in fdf.itertuples() if r.value > 0][:4]
             if tips:
-                st.markdown("**💡 ข้อเสนอแนะ**")
+                st.markdown("**ข้อเสนอแนะ**")
                 for name, val, tip in tips:
                     st.markdown(f"- **{name}** (ค่า: {val}) → {tip}")
 
             c1, c2 = st.columns(2)
             latest_uci = (windows.sort_values("term_no").groupby(ID_COL, sort=False).tail(1)
                           .drop(columns="term_no") if len(windows) else pd.DataFrame())
-            if c1.button("➕ เพิ่มเข้ารายชื่อในแดชบอร์ด", type="primary",
+            if c1.button("เพิ่มเข้ารายชื่อในแดชบอร์ด", type="primary",
                          disabled=latest_uci.empty,
-                         help="รายชื่อหลักใช้โมเดล UCI กับ 2 ภาคล่าสุด"):
+                         help="เพิ่มชั่วคราวในรายชื่อตัวอย่าง UCI (หายเมื่อปิดเว็บ) · ถ้าต้องการให้ขึ้นในรายชื่อหลักแบบถาวร ให้บันทึกลงฐานข้อมูล"):
                 current = st.session_state.get("kku_rows")
                 merged = latest_uci if current is None else pd.concat([current, latest_uci])
                 st.session_state["kku_rows"] = merged.drop_duplicates(ID_COL, keep="last")
@@ -671,6 +1151,26 @@ with tab_kku:
             if c2.button("ล้างข้อมูลที่กรอก"):
                 st.session_state.pop("kku_preview", None)
                 st.rerun()
+
+            if not is_admin:
+                st.caption("การบันทึกลงฐานข้อมูลทำได้ในมุมมองผู้ดูแลระบบ")
+            else:
+                with st.expander("บันทึกลงฐานข้อมูล"):
+                    consent = st.checkbox(
+                        "ยืนยันว่าเป็นข้อมูลของตนเอง หรือได้รับความยินยอม/อนุญาตจากเจ้าของข้อมูลแล้ว "
+                        "และไม่มีชื่อหรือรหัสนักศึกษาจริง", key="kku_consent")
+                    src_label = st.selectbox("ที่มาของข้อมูล",
+                                             ["กรอกเอง", "แบบฟอร์มยินยอม", "ระบบทะเบียน (ได้รับอนุญาต)"])
+                    if st.button("บันทึก", disabled=not consent):
+                        try:
+                            n = db.save_students(preview, source=src_label, consent=consent)
+                            load_db_students.clear()
+                            db.save_assessments(timeline, source,
+                                                float(kku_bundle["threshold"]) if kku_bundle
+                                                else threshold)
+                            st.success(f"บันทึกแล้ว {n} คน พร้อมผลประเมินรายภาค")
+                        except Exception as e:
+                            st.error(f"บันทึกไม่สำเร็จ: {e}")
 
     if kku_rows is not None and len(kku_rows):
         st.info(f"มีนักศึกษา มข. ในรายชื่อแดชบอร์ด {len(kku_rows)} คน: "
@@ -684,7 +1184,4 @@ with tab_kku:
         "ต้องตรวจกับระเบียบ มข. ของรุ่นนั้น · ถ้ายังไม่มีโมเดล มข. ชั้นโมเดลเป็นการยืมรูปแบบจาก UCI "
         "ผลนี้ใช้สาธิต ยังไม่ใช่การยืนยันความแม่นยำ จนกว่าจะทดสอบกับข้อมูล มข. ที่รู้ผลจริง")
 
-st.divider()
-st.caption("⚠️ ข้อพึงระวังเชิงจริยธรรม: ผลทำนายอาจมีอคติจากข้อมูลในอดีต "
-           "ควรใช้เพื่อ 'จัดลำดับการเข้าไปช่วยเหลือ' เท่านั้น "
-           "ไม่ควรใช้ตัดสิทธิ์หรือเปิดเผยต่อบุคคลที่ไม่เกี่ยวข้อง")
+render_footer()

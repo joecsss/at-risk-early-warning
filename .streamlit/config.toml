@@ -1,0 +1,36 @@
+# ธีมหน้าตาของแดชบอร์ด — Streamlit อ่านไฟล์นี้ตอน "เริ่มแอป" เท่านั้น
+# แก้แล้วต้องปิดแล้วรัน `streamlit run src/app.py` ใหม่ (กด R บนหน้าเว็บไม่พอ)
+#
+# สีหลักคือ "สีอิฐ" ประจำมหาวิทยาลัยขอนแก่น
+# >>> ปรับโทนสีอิฐได้ที่ primaryColor บรรทัดเดียว (ที่เดียวพอ)
+#     ส่วนหัวเว็บ ปุ่ม แถบแท็บ และเส้นขอบใน src/app.py อ่านค่านี้ไปใช้ต่อให้อัตโนมัติ
+#     เทียบกับเว็บ มข. (registrar.kku.ac.th) แล้วถ้าอยากเข้มขึ้นลองใช้ "#8C3522"
+#     อยากอ่อน/สว่างขึ้นลองใช้ "#B55235" หรือ "#AE4A2F"
+
+[theme]
+base = "light"
+primaryColor = "#A3422B"                  # สีอิฐ (จุดเดียวที่ต้องแก้ถ้าจะเปลี่ยนโทน)
+backgroundColor = "#FFFFFF"               # พื้นหลังขาว
+secondaryBackgroundColor = "#F4F2F0"      # เทาอ่อนมาก (แถบข้าง กล่องรอง ส่วนท้าย)
+textColor = "#1A1A1A"                     # เกือบดำ
+borderColor = "#DDD8D3"                   # เส้นขอบบาง
+linkColor = "#8C3522"
+# กล่องแจ้งข้อมูล (st.info) เดิมเป็นสีฟ้าสด ปรับเป็นน้ำเงินเทาให้เข้าชุดกับสีอิฐ
+# (พื้นหลังและสีตัวอักษร Streamlit คำนวณให้เองจากค่านี้)
+blueColor = "#4A6B8A"
+
+# ฟอนต์ Sarabun ถูกโหลดจาก Google Fonts ใน inject_style() ของ src/app.py
+# ตั้งชื่อฟอนต์ไว้ตรงนี้ด้วย เพื่อให้ตาราง (ที่วาดด้วย canvas) และวิดเจ็ตใช้ฟอนต์เดียวกัน
+font = "Sarabun, sans-serif"
+headingFont = "Sarabun, sans-serif"
+baseFontSize = 15
+
+# มุมโค้งเล็ก ขอบบาง ไม่มีเงาหนา
+baseRadius = "4px"
+buttonRadius = "4px"
+showWidgetBorder = true
+showSidebarBorder = true
+
+# ตาราง: หัวตารางพื้นเทาอ่อน + เส้นขอบสีเดียวกับทั้งระบบ
+dataframeHeaderBackgroundColor = "#EDEAE6"
+dataframeBorderColor = "#DDD8D3"

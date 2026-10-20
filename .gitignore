@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 venv/
 data/*.csv
+data/*.db
+*.db-journal
 # ข้อยกเว้นสำหรับเดโมออนไลน์: ไฟล์ที่สร้างจากชุดสาธารณะ UCI เท่านั้น (ไม่มีข้อมูลจริงของนักศึกษา)
 !data/processed_train.csv
 !data/processed_test.csv
@@ -24,3 +26,10 @@ src/kku_real_sample.py
 
 # Local editor / tool settings
 .claude/settings.local.json
+
+# รหัสผ่านมุมมองผู้ดูแลระบบ (ห้ามขึ้น GitHub — ใช้ secrets.toml.example เป็นแบบ)
+.streamlit/secrets.toml
+
+# skill/ตั้งค่าของเครื่องมือ AI ที่ติดตั้งในเครื่อง (ไม่ใช่ส่วนของระบบ)
+.agents/
+skills-lock.json

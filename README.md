@@ -20,7 +20,8 @@ at-risk-early-warning/
 │  ├─ kku_schema.py     # พจนานุกรมข้อมูลตามระบบทะเบียน มข. + ตรวจไฟล์
 │  ├─ kku_mapping.py    # ตัวแปลงข้อมูล มข. -> ฟีเจอร์ UCI (ใช้กับโมเดลชั่วคราว)
 │  ├─ kku_timeline.py   # ประเมินความเสี่ยงทุกภาค (โมเดล + กฎทะเบียน + แนวโน้ม)
-│  ├─ train_kku.py      # ฝึกโมเดลจากข้อมูล มข. (python src/train_kku.py --data <csv>)
+│  ├─ train_kku.py      # ฝึกโมเดลจากข้อมูล มข. (--data <csv> หรือ --db)
+│  ├─ db.py             # ฐานข้อมูล STUDENT, TERM_RECORD, RISK_ASSESSMENT (SQLite หรือ PostgreSQL ผ่าน DATABASE_URL)
 │  └─ app.py            # แดชบอร์ด Streamlit สำหรับอาจารย์
 ├─ data/                # ข้อมูล (ไม่ commit — ดู data/README.md)
 ├─ models/              # โมเดลที่เทรนแล้ว (.joblib) + metrics.json

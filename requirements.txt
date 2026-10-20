@@ -7,3 +7,4 @@ matplotlib
 streamlit
 joblib
 ucimlrepo
+psycopg2-binary       # ฐานข้อมูลออนไลน์ PostgreSQL (ไม่ตั้ง DATABASE_URL ก็ไม่ได้ใช้)
