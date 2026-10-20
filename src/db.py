@@ -8,8 +8,8 @@ db.py — ฐานข้อมูลของระบบตามแผนภ�
 
 บรรทัดคำสั่ง (ใช้ฐานข้อมูลตามที่ตั้งค่าไว้ ถ้าไม่ได้ตั้งจะใช้ SQLite):
     python src/db.py --stats                       # มีข้อมูลกี่คน กี่ภาค ใช้ฐานข้อมูลไหน
-    python src/db.py --import data/kku_xxx.csv --source registrar --consent
-    python src/db.py --export data/backup.csv      # ส่งออกเป็น CSV รูปแบบเดียวกับที่นำเข้า
+    python src/db.py --import data/kku_xxx.csv --source registrar --consent   # รับได้ทั้ง 2 แบบ
+    python src/db.py --export data/backup.csv      # ส่งออก CSV แบบ 1 คน 1 แถว (--per-term = 1 แถวต่อเทอม)
     python src/db.py --delete KKU-001              # ลบ 1 คน (พร้อมผลการเรียนและผลการประเมิน)
     python src/db.py --copy-from-sqlite            # คัดลอกข้อมูลจาก SQLite ในเครื่องขึ้นฐานข้อมูลออนไลน์
 
@@ -333,6 +333,8 @@ def main() -> None:
     ap.add_argument("--copy-from-sqlite", action="store_true",
                     help="คัดลอกข้อมูลจาก data/kku_app.db ขึ้นฐานข้อมูลออนไลน์")
     ap.add_argument("--local", action="store_true", help="บังคับใช้ SQLite ในเครื่อง")
+    ap.add_argument("--per-term", action="store_true",
+                    help="ส่งออกแบบ 1 แถวต่อเทอม (ค่าเริ่มต้นคือ 1 คน 1 แถว)")
     ap.add_argument("--source", default="import", help="ที่มาของข้อมูล เช่น registrar, consent-form")
     ap.add_argument("--consent", action="store_true", help="ยืนยันว่าได้รับอนุญาต/ยินยอมแล้ว")
     a = ap.parse_args()
@@ -348,7 +350,11 @@ def main() -> None:
         n = save_students(pd.read_csv(a.import_csv), source=a.source, consent=a.consent)
         print(f"นำเข้า {n} คน")
     if a.export_csv:
-        load_students().to_csv(a.export_csv, index=False, encoding="utf-8-sig")
+        out = load_students()
+        if not a.per_term:
+            from kku_schema import to_wide
+            out = to_wide(out)
+        out.to_csv(a.export_csv, index=False, encoding="utf-8-sig")
         print(f"ส่งออก: {a.export_csv}")
     if a.delete:
         delete_student(a.delete)

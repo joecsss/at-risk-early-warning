@@ -23,16 +23,19 @@ import joblib
 from common import (ID_COL, METRICS_JSON, MODEL_FILE, MODEL_KKU_FILE, TARGET_COL, TEST_CSV,
                     TRAIN_CSV)
 from explain import RiskExplainer
-from feature_labels import GENERIC_INTERVENTION, decode_value, label_th, suggest
+from feature_labels import (INTERVENTIONS, SUGGEST_NOTE, decode_value, label_th,
+                            should_suggest)
 from kku_mapping import PARENT_EDU, PARENT_OCC, STATUS_OPTIONS
 import db
 from kku_schema import CHOICES, TERM_FIELDS, dictionary_df
 from kku_schema import COLUMNS as KKU_SCHEMA_COLUMNS
 from kku_schema import template_df as kku_template_df
+from kku_schema import ensure_long, template_wide_df, to_wide
 from kku_schema import validate as validate_kku_terms
-from kku_timeline import (DISMISS_GPAX, KKU_FEATURE_LABELS, KKU_FEATURES, KKU_INTERVENTIONS,
-                          LEVEL_COLORS, PROBATION_GPAX, build_timeline, factors_in_kku_terms,
-                          first_alert, is_known_at_risk)
+from kku_timeline import (DISMISS_GPAX, KKU_CONCERN, KKU_FEATURE_LABELS, KKU_FEATURES,
+                          KKU_INTERVENTIONS, LEVEL_COLORS, PROBATION_GPAX, UCI_TIPS_IN_KKU,
+                          WATCH_FACTOR, build_timeline, factors_in_kku_terms, first_alert,
+                          is_known_at_risk)
 
 st.set_page_config(page_title="ระบบเตือนภัยล่วงหน้านักศึกษาเสี่ยง",
                    page_icon="🎓", layout="wide")
@@ -277,17 +280,36 @@ def factor_chart(expl, row: pd.DataFrame, k: int = 8):
     return chart, factors
 
 
-def render_suggestions(factors, row: pd.DataFrame) -> None:
-    st.subheader("ข้อเสนอแนะการช่วยเหลือ")
-    pushers = [(f, v) for f, v in factors if v > 0][:4]
-    if not pushers:
-        st.success("ไม่พบปัจจัยที่ผลักดันความเสี่ยงอย่างมีนัยสำคัญสำหรับนักศึกษาคนนี้")
-    for f, v in pushers:
-        st.markdown(
-            f"- **{label_th(f)}** (ค่าปัจจุบัน: {decode_value(f, row[f].iloc[0])}, "
-            f"อิทธิพล {v:+.2f}) → {suggest(f)}")
-    st.caption("ข้อเสนอแนะสร้างจากปัจจัยที่โมเดลให้น้ำหนัก — "
-               "โปรดใช้ประกอบดุลยพินิจและข้อมูลจริงของนักศึกษาเสมอ")
+def collect_tips(fdf: pd.DataFrame, rule_row, rules=None, interventions=None,
+                 wording=None, k: int = 4) -> list[tuple[str, str, float, str]]:
+    """ตารางปัจจัย (feature, ปัจจัย, ค่า, value) -> [(ชื่อ, ค่า, SHAP, ข้อเสนอแนะ)]
+    เฉพาะปัจจัยที่ผ่าน should_suggest (ดันความเสี่ยงมากพอ + ค่าจริงอยู่ฝั่งที่น่าห่วง)."""
+    interventions = INTERVENTIONS if interventions is None else interventions
+    wording = wording or {}
+    tips = [(r.ปัจจัย, r.ค่า, r.value, wording.get(r.feature, interventions[r.feature]))
+            for r in fdf.itertuples()
+            if should_suggest(r.feature, r.value, rule_row, rules, interventions)]
+    return tips[:k]
+
+
+def show_tips(tips, level: str, heading: str = "ข้อเสนอแนะการช่วยเหลือ") -> None:
+    """แสดงข้อเสนอแนะ — ระดับ 'ปกติ' ไม่สร้างข้อเสนอแนะ (กราฟ SHAP ยังแสดงเพื่อความโปร่งใส)."""
+    st.subheader(heading)
+    if level == "ปกติ":
+        st.info("ระดับปกติ — ยังไม่มีข้อเสนอแนะ · กราฟด้านบนแสดงเหตุผลของโมเดลเพื่อความโปร่งใสเท่านั้น")
+    elif tips:
+        for name, val, v, tip in tips:
+            st.markdown(f"- **{name}** (ค่าปัจจุบัน: {val}, อิทธิพล {v:+.2f}) → {tip}")
+    else:
+        st.success("ไม่พบปัจจัยด้านการเรียนหรือการเงินที่ชัดพอจะใช้เป็นข้อเสนอแนะ — "
+                   "ดูเหตุผลของระดับประกอบ")
+    st.caption(SUGGEST_NOTE)
+
+
+def render_suggestions(factors, row: pd.DataFrame, band: str) -> None:
+    fdf = pd.DataFrame([{"feature": f, "ปัจจัย": label_th(f),
+                         "ค่า": decode_value(f, row[f].iloc[0]), "value": v} for f, v in factors])
+    show_tips(collect_tips(fdf, row.iloc[0]), band)
 
 
 # ------------------------------------------------- ฟังก์ชันช่วยของข้อมูล มข.
@@ -316,6 +338,27 @@ def kku_factor_chart(fdf: pd.DataFrame, units: str):
 
 def yes_no(v) -> int:
     return int(v == "ใช่")
+
+
+def term_risk_chart(tl_df: pd.DataFrame, title: str, y_title: str | None, height: int):
+    """กราฟความเสี่ยงจากโมเดลรายภาค — ภาคแรกไม่มีค่าโมเดล (ต้องใช้ 2 ภาคติดกัน)
+    จึงล็อกแกน x ให้แสดงทุกภาค และเขียนกำกับว่า "ใช้กฎ" แทนการหายไปจากกราฟ."""
+    order = tl_df["ภาค"].tolist()
+    x = alt.X("ภาค:N", sort=order, scale=alt.Scale(domain=order), title=None)
+    bars = alt.Chart(tl_df).mark_bar().encode(
+        x=x,
+        y=alt.Y("model_prob:Q", scale=alt.Scale(domain=[0, 1]),
+                axis=alt.Axis(format="%"), title=y_title),
+        color=alt.Color("ระดับ:N", scale=alt.Scale(
+            domain=list(LEVEL_PALETTE), range=list(LEVEL_PALETTE.values())),
+            legend=alt.Legend(title=None, orient="bottom")),
+        tooltip=["ภาค", "ระดับ", alt.Tooltip("model_prob:Q", format=".0%"), "เหตุผล"],
+    )
+    no_model = tl_df[tl_df["model_prob"].isna()].assign(note="ใช้กฎ")
+    notes = alt.Chart(no_model).mark_text(fontSize=11, color=MUTED).transform_calculate(
+        ypos="0.06").encode(x=x, y=alt.Y("ypos:Q"), text="note:N",
+                            tooltip=["ภาค", "ระดับ", "เหตุผล"])
+    return alt.layer(bars, notes).properties(height=height, width="container", title=title)
 
 
 # ------------------------------------------------- มุมมองผู้ใช้งาน (2 บทบาท)
@@ -409,9 +452,16 @@ def render_sidebar_settings(is_admin: bool) -> tuple[pd.DataFrame, float]:
 
     threshold = st.slider(
         "เกณฑ์ตัดสินว่า 'เสี่ยง' (probability)", 0.05, 0.95,
-        value=round(default_threshold, 2), step=0.01,
-        help="ลดค่านี้ = จับกลุ่มเสี่ยงได้ครบขึ้น (recall สูง) แต่แจ้งเตือนเกินจริงมากขึ้น",
+        value=float(round(default_threshold, 3)), step=0.001, format="%.3f",
+        help="ลดค่านี้ = จับกลุ่มเสี่ยงได้ครบขึ้น (recall สูง) แต่แจ้งเตือนเกินจริงมากขึ้น · "
+             "มีผลเฉพาะหน้าจอผู้ดูแลในรอบนี้ อาจารย์ที่ปรึกษายังใช้เกณฑ์ที่จูนไว้",
     )
+    st.caption(f"ระดับที่เกณฑ์นี้: เฝ้าระวัง ≥ {threshold / 2:.3f} · เสี่ยง ≥ {threshold:.3f} · "
+               f"เสี่ยงสูง ≥ {threshold + (1 - threshold) / 2:.3f} · "
+               f"รายภาค มข.: เฝ้าระวังจากโมเดล ≥ {threshold * WATCH_FACTOR:.3f}")
+    if abs(threshold - round(default_threshold, 3)) > 1e-9:
+        st.warning(f"กำลังทดลองเกณฑ์ {threshold:.3f} (ค่าที่จูนไว้ {default_threshold:.3f}) — "
+                   "ตัวเลขบนจอนี้จะต่างจากเล่มและจากที่อาจารย์เห็น")
 
     st.divider()
     st.subheader("ข้อมูลโมเดล")
@@ -658,16 +708,10 @@ with tabs[TAB_PERSON]:
                   delta_color="inverse" if cur["credits_behind"] else "off")
         m4.metric("เตือนครั้งแรก", first_alert(kku_tl, sid) or "ยังไม่เคย")
 
-        order = tl_one["ภาค"].tolist()
-        st.altair_chart(alt.Chart(tl_one).mark_bar().encode(
-            x=alt.X("ภาค:N", sort=order, title=None),
-            y=alt.Y("model_prob:Q", scale=alt.Scale(domain=[0, 1]),
-                    axis=alt.Axis(format="%"), title="ความเสี่ยงจากโมเดล"),
-            color=alt.Color("ระดับ:N", scale=alt.Scale(
-                domain=list(LEVEL_PALETTE), range=list(LEVEL_PALETTE.values())),
-                legend=alt.Legend(title="ระดับรวม", orient="bottom")),
-            tooltip=["ภาค", "ระดับ", alt.Tooltip("model_prob:Q", format=".0%"), "เหตุผล"],
-        ).properties(height=220, width="container", title="ระดับความเสี่ยงรายภาค"))
+        st.altair_chart(term_risk_chart(tl_one, "ระดับความเสี่ยงรายภาค (สี = ระดับรวม)",
+                                        "ความเสี่ยงจากโมเดล", 220))
+        st.caption("ภาคแรกยังไม่มีค่าจากโมเดล เพราะโมเดลต้องดู 2 ภาคติดกัน "
+                   "ภาคนั้นจึงประเมินด้วยกฎ (GPAX, F/W, หน่วยกิต, การเงิน) อย่างเดียว")
         st.dataframe(
             tl_one[["ภาค", "gpa", "gpax", "n_f", "n_w", "term_result", "ระดับ", "เหตุผล"]].rename(
                 columns={"gpa": "GPA", "gpax": "GPAX", "n_f": "F", "n_w": "W",
@@ -686,8 +730,7 @@ with tabs[TAB_PERSON]:
             fdf = pd.DataFrame([{"feature": f, "ปัจจัย": KKU_FEATURE_LABELS.get(f, f),
                                  "ค่า": str(krow[f].iloc[0]), "value": v} for f, v in facs])
             st.altair_chart(kku_factor_chart(fdf, kexpl.units))
-            tips = [(r.ปัจจัย, r.ค่า, KKU_INTERVENTIONS.get(r.feature, GENERIC_INTERVENTION))
-                    for r in fdf.itertuples() if r.value > 0][:4]
+            tips = collect_tips(fdf, tf_one.iloc[-1], KKU_CONCERN, KKU_INTERVENTIONS)
         else:
             wrow = kku_win[(kku_win[ID_COL] == sid) & (kku_win["term_no"] == cur["term_no"])]
             if wrow.empty:
@@ -699,12 +742,8 @@ with tabs[TAB_PERSON]:
                 st.altair_chart(kku_factor_chart(fdf.head(8), uexpl.units))
                 st.caption("แสดงเฉพาะปัจจัยที่มาจากข้อมูล มข. จริง · ฟีเจอร์ของชุด UCI ที่ มข. "
                            f"ไม่มีถูกเติมค่าคงที่ (รวมกันมีผล {filled:+.3f}) และไม่นำมาตีความ")
-                tips = [(r.ปัจจัย, r.ค่า, suggest(r.feature))
-                        for r in fdf.itertuples() if r.value > 0][:4]
-        if tips:
-            st.subheader("ข้อเสนอแนะการช่วยเหลือ")
-            for name, val, tip in tips:
-                st.markdown(f"- **{name}** (ค่า: {val}) → {tip}")
+                tips = collect_tips(fdf, wrow[features].iloc[0], wording=UCI_TIPS_IN_KKU)
+        show_tips(tips, cur["ระดับ"])
     else:
         st.caption("ข้อมูลตัวอย่างสาธารณะ (UCI) · ใช้สาธิตการทำงาน")
         ranked = work.sort_values("risk", ascending=False)
@@ -723,7 +762,7 @@ with tabs[TAB_PERSON]:
         with left:
             st.metric("ระดับความเสี่ยง", f"{p * 100:.1f}%", band)
             st.progress(min(p, 1.0))
-            st.caption(f"เกณฑ์ปัจจุบัน: {threshold:.2f} — "
+            st.caption(f"เกณฑ์ปัจจุบัน: {threshold:.3f} — "
                        f"{'เข้าเกณฑ์ต้องติดตาม' if p >= threshold else 'ยังไม่เข้าเกณฑ์'}")
             for c in ("Course", "Age at enrollment", "Tuition fees up to date",
                       "Debtor", "Scholarship holder"):
@@ -735,7 +774,7 @@ with tabs[TAB_PERSON]:
             chart, factors = factor_chart(expl, row)
             st.altair_chart(chart)
 
-        render_suggestions(factors, row)
+        render_suggestions(factors, row, band)
 
 # ------------------------------------- แท็บ 3: ภาพรวมโมเดล (เฉพาะผู้ดูแลระบบ)
 if TAB_MODEL in tabs:
@@ -787,7 +826,7 @@ if TAB_MODEL in tabs:
             tp = int(((pred == 1) & (y == 1)).sum())
             c1, c2 = st.columns([2, 3])
             with c1:
-                st.subheader(f"ตารางความสับสน ที่เกณฑ์ {threshold:.2f}")
+                st.subheader(f"ตารางความสับสน ที่เกณฑ์ {threshold:.3f}")
                 st.dataframe(pd.DataFrame(
                     [[f"TN = {tn}", f"FP = {fp} (เตือนเกิน)"],
                      [f"FN = {fn} (พลาด)", f"TP = {tp}"]],
@@ -941,18 +980,26 @@ with tabs[TAB_KKU]:
                 st.session_state["kku_preview"] = terms.assign(**profile)[KKU_SCHEMA_COLUMNS]
 
     elif mode == "อัปโหลดไฟล์ CSV รูปแบบทะเบียน":
-        st.download_button(
-            "ไฟล์ตัวอย่าง (1 แถว = 1 คน × 1 ภาค)",
+        d1, d2 = st.columns(2)
+        d1.download_button(
+            "ไฟล์ตัวอย่าง: 1 คน = 1 แถว (แนะนำ)",
+            template_wide_df().to_csv(index=False).encode("utf-8-sig"),
+            file_name="kku_template_1row_per_student.csv", mime="text/csv",
+            help="คอลัมน์รายเทอมตั้งชื่อ t<ลำดับเทอม>_<ฟิลด์> เช่น t1_gpa, t1_cr, t2_gpa · "
+                 "เทอมที่ยังไม่ได้เรียนเว้นว่าง")
+        d2.download_button(
+            "ไฟล์ตัวอย่าง: 1 แถว = 1 คน × 1 เทอม",
             kku_template_df().to_csv(index=False).encode("utf-8-sig"),
-            file_name="kku_template_terms.csv", mime="text/csv")
-        st.caption("คอลัมน์บังคับดูได้จากพจนานุกรมข้อมูลด้านบน คอลัมน์อื่นเว้นว่างได้ · "
-                   "ข้อมูลโปรไฟล์ใส่แค่แถวแรกของแต่ละคนก็ได้ · ค่าที่เป็นตัวเลือก: "
+            file_name="kku_template_1row_per_term.csv", mime="text/csv")
+        st.caption("อัปโหลดได้ทั้ง 2 แบบ ระบบแยกเป็นรายเทอมให้เองเพราะต้องประเมินทีละเทอม · "
+                   "แบบ 1 คน 1 แถว: เทอมที่ 1 คือ t1_..., เทอมที่ 2 คือ t2_... ไม่ต้องกรอกเทอมที่ยังไม่ได้เรียน · "
+                   "คอลัมน์บังคับดูได้จากพจนานุกรมข้อมูลด้านบน คอลัมน์อื่นเว้นว่างได้ · ค่าที่เป็นตัวเลือก: "
                    + " | ".join(f"{k}: {' / '.join(o for o in v if o)}"
                                 for k, v in CHOICES.items()
                                 if k in ("term_result", "admission_method", "family_income")))
         up = st.file_uploader("อัปโหลดไฟล์ CSV", type="csv", key="kku_upload")
         if up is not None:
-            st.session_state["kku_preview"] = pd.read_csv(up)
+            st.session_state["kku_preview"] = ensure_long(pd.read_csv(up))
 
     else:
         try:
@@ -976,8 +1023,8 @@ with tabs[TAB_KKU]:
                 st.rerun()
             if is_admin:
                 c2.download_button(
-                    "ส่งออกทั้งหมด (CSV)",
-                    db.load_students().to_csv(index=False).encode("utf-8-sig"),
+                    "ส่งออกทั้งหมด (CSV 1 คน 1 แถว)",
+                    to_wide(db.load_students()).to_csv(index=False).encode("utf-8-sig"),
                     file_name="kku_database_export.csv", mime="text/csv")
                 if c3.button("ลบที่เลือกออกจากฐานข้อมูล", disabled=not pick):
                     for sid in pick:
@@ -1072,36 +1119,34 @@ with tabs[TAB_KKU]:
             c_chart = alt.Chart(cdf).mark_line(point=True).encode(
                 x=alt.X("ภาค:N", sort=order, title=None),
                 y=alt.Y("หน่วยกิต:Q", title=None),
-                color=alt.Color("ชนิด:N", scale=alt.Scale(range=[FALL_COLOR, MUTED]),
-                                legend=alt.Legend(title=None, orient="bottom")),
-                strokeDash=alt.StrokeDash("ชนิด:N", legend=None),
+                color=alt.Color("ชนิด:N", scale=alt.Scale(
+                    domain=["สะสมจริง (CP)", "ตามแผน"], range=[FALL_COLOR, MUTED]),
+                    legend=alt.Legend(title=None, orient="bottom", symbolType="stroke",
+                                      symbolStrokeWidth=2)),
+                strokeDash=alt.StrokeDash("ชนิด:N", scale=alt.Scale(
+                    domain=["สะสมจริง (CP)", "ตามแผน"], range=[[1, 0], [4, 4]]), legend=None),
                 tooltip=["ภาค", "ชนิด", "หน่วยกิต"],
             ).properties(height=240, width="container", title="หน่วยกิตสะสม เทียบแผน")
-            r_chart = alt.Chart(tl).mark_bar().encode(
-                x=alt.X("ภาค:N", sort=order, title=None),
-                y=alt.Y("model_prob:Q", scale=alt.Scale(domain=[0, 1]),
-                        axis=alt.Axis(format="%"), title=None),
-                color=alt.Color("ระดับ:N", scale=alt.Scale(
-                    domain=list(LEVEL_PALETTE), range=list(LEVEL_PALETTE.values())),
-                    legend=alt.Legend(title=None, orient="bottom")),
-                tooltip=["ภาค", "ระดับ", alt.Tooltip("model_prob:Q", format=".0%"), "เหตุผล"],
-            ).properties(height=240, width="container",
-                         title="ความเสี่ยงจากโมเดล (สี = ระดับรวม)")
+            r_chart = term_risk_chart(tl, "ความเสี่ยงจากโมเดล (สี = ระดับรวม)", None, 240)
             c1, c2, c3 = st.columns(3)
             c1.altair_chart(g_chart)
             c2.altair_chart(c_chart)
             c3.altair_chart(r_chart)
 
             # ---- ตารางแบบหน้าผลการเรียน
+            # ภาคแรกไม่มีค่าโมเดล (ต้องใช้ 2 ภาคติดกัน) — เขียน "ใช้กฎ" แทนช่องว่าง/None
+            model_txt = pd.to_numeric(tl["model_prob"], errors="coerce").map(
+                lambda p: "ใช้กฎ" if pd.isna(p) else f"{p:.2f}")
             st.dataframe(
-                tl[["ภาค", "cr", "cp", "gpa", "gpax", "n_f", "n_w", "term_result",
-                    "model_prob", "ระดับ", "เหตุผล"]].rename(columns={
+                tl[["ภาค", "cr", "cp", "gpa", "gpax", "n_f", "n_w", "term_result"]]
+                .assign(model_prob=model_txt.values, ระดับ=tl["ระดับ"].values,
+                        เหตุผล=tl["เหตุผล"].values)
+                .rename(columns={
                     "cr": "CR", "cp": "CP", "gpa": "GPA", "gpax": "GPAX", "n_f": "F", "n_w": "W",
                     "term_result": "ผลการศึกษา (ทะเบียน)", "model_prob": "โมเดล"}),
                 hide_index=True,
                 column_config={"GPA": st.column_config.NumberColumn(format="%.2f"),
                                "GPAX": st.column_config.NumberColumn(format="%.2f"),
-                               "โมเดล": st.column_config.NumberColumn(format="%.2f"),
                                "เหตุผล": st.column_config.TextColumn(width="large")})
 
             # ---- เหตุผลของโมเดลในภาคล่าสุด (ภาษา มข.)
@@ -1114,8 +1159,7 @@ with tabs[TAB_KKU]:
                     "feature": f, "ปัจจัย": KKU_FEATURE_LABELS.get(f, f),
                     "ค่า": str(row[f].iloc[0]), "value": v} for f, v in facs])
                 st.altair_chart(kku_factor_chart(fdf, kexpl.units))
-                tips = [(r.ปัจจัย, r.ค่า, KKU_INTERVENTIONS.get(r.feature, GENERIC_INTERVENTION))
-                        for r in fdf.itertuples() if r.value > 0][:4]
+                tips = collect_tips(fdf, tfs.iloc[-1], KKU_CONCERN, KKU_INTERVENTIONS)
             else:
                 wrow = windows[(windows[ID_COL] == sid_sel) & (windows["term_no"] == cur["term_no"])]
                 if wrow.empty:
@@ -1130,12 +1174,8 @@ with tabs[TAB_KKU]:
                         f"แสดงเฉพาะปัจจัยที่มาจากข้อมูล มข. จริง · ฟีเจอร์ของชุด UCI ที่ มข. ไม่มี "
                         f"(คะแนนสอบเข้า, ตัวเลขเศรษฐกิจโปรตุเกส, รหัสสาขา ฯลฯ) ถูกเติมค่าคงที่ "
                         f"และรวมกันมีผล {filled:+.3f} — ไม่นำมาตีความ")
-                    tips = [(r.ปัจจัย, r.ค่า, suggest(r.feature))
-                            for r in fdf.itertuples() if r.value > 0][:4]
-            if tips:
-                st.markdown("**ข้อเสนอแนะ**")
-                for name, val, tip in tips:
-                    st.markdown(f"- **{name}** (ค่า: {val}) → {tip}")
+                    tips = collect_tips(fdf, wrow[features].iloc[0], wording=UCI_TIPS_IN_KKU)
+            show_tips(tips, cur["ระดับ"], "ข้อเสนอแนะ")
 
             c1, c2 = st.columns(2)
             latest_uci = (windows.sort_values("term_no").groupby(ID_COL, sort=False).tail(1)

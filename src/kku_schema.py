@@ -14,6 +14,7 @@ kku_schema.py — พจนานุกรมข้อมูล (data dictionary
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 import pandas as pd
@@ -123,9 +124,57 @@ def dictionary_df() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ------------------------------------------------ แบบ 1 คน 1 แถว (wide format)
+# คนกรอกไฟล์ง่ายกว่าเมื่อ 1 คนอยู่แถวเดียว: คอลัมน์โปรไฟล์ + คอลัมน์รายเทอมแบบ t<ลำดับเทอม>_<ฟิลด์>
+# เช่น t1_gpa, t1_cr, t2_gpa, ... ระบบแปลงเป็น 1 แถวต่อเทอมเองตอนอ่าน เพราะการประเมินและการเทรน
+# ต้องดูทีละเทอม (แต่ละเทอมคือ 1 ตัวอย่าง) — ใช้ได้ทั้ง 2 แบบทุกที่ที่รับไฟล์
+_WIDE_RE = re.compile(r"^t(\d+)_(.+)$")
+WIDE_TERM_FIELDS = [c for c in TERM_FIELDS if c != "term_no"]
+
+
+def is_wide(df: pd.DataFrame) -> bool:
+    return "term_no" not in df.columns and any(_WIDE_RE.match(str(c)) for c in df.columns)
+
+
+def from_wide(df: pd.DataFrame) -> pd.DataFrame:
+    """1 คน 1 แถว -> 1 แถวต่อเทอม (ข้ามเทอมที่ไม่มี GPA เช่น ยังไม่ได้เรียนหรือเกรดยังไม่ออก)."""
+    terms = sorted({int(m.group(1)) for c in df.columns if (m := _WIDE_RE.match(str(c)))})
+    prof_cols = [c for c in PROFILE_FIELDS if c in df.columns]
+    rows = []
+    for _, r in df.iterrows():
+        for k in terms:
+            vals = {f: r[f"t{k}_{f}"] for f in WIDE_TERM_FIELDS if f"t{k}_{f}" in df.columns}
+            gpa = vals.get("gpa")
+            if gpa is None or pd.isna(gpa) or str(gpa).strip() == "":
+                continue
+            rows.append({**{c: r[c] for c in prof_cols}, "term_no": k, **vals})
+    return pd.DataFrame(rows, columns=prof_cols + ["term_no"] + WIDE_TERM_FIELDS)
+
+
+def to_wide(df: pd.DataFrame, n_terms: int | None = None) -> pd.DataFrame:
+    """1 แถวต่อเทอม -> 1 คน 1 แถว (n_terms = จำนวนชุดคอลัมน์เทอมขั้นต่ำ เช่น 8 สำหรับไฟล์ตัวอย่าง)."""
+    d = normalize(df)
+    max_t = int(d["term_no"].max()) if len(d) else 0
+    n = max(max_t, n_terms or 0)
+    cols = list(PROFILE_FIELDS) + [f"t{k}_{f}" for k in range(1, n + 1) for f in WIDE_TERM_FIELDS]
+    out = []
+    for _sid, g in d.groupby("student_id", sort=False):
+        row = {c: g.iloc[0][c] for c in PROFILE_FIELDS}
+        for _, r in g.iterrows():
+            for f in WIDE_TERM_FIELDS:
+                row[f"t{int(r['term_no'])}_{f}"] = r[f]
+        out.append(row)
+    return pd.DataFrame(out).reindex(columns=cols)
+
+
+def ensure_long(df: pd.DataFrame) -> pd.DataFrame:
+    """รับได้ทั้ง 2 แบบ คืนแบบ 1 แถวต่อเทอมเสมอ."""
+    return from_wide(df) if is_wide(df) else df
+
+
 def normalize(df: pd.DataFrame) -> pd.DataFrame:
     """เติมคอลัมน์ที่ไม่บังคับด้วยค่าเริ่มต้น แปลงชนิดข้อมูล และกระจายโปรไฟล์ให้ทุกแถวของคนเดียวกัน."""
-    df = df.copy()
+    df = ensure_long(df).copy()
     df["student_id"] = df["student_id"].astype(str).str.strip()
     prof_cols = [c for c in PROFILE_FIELDS if c in df.columns and c != "student_id"]
     if prof_cols:
@@ -146,6 +195,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def validate(df: pd.DataFrame) -> list[str]:
+    df = ensure_long(df)
     missing = [c for c, f in ALL_FIELDS.items() if f[2] and c not in df.columns]
     if missing:
         return [f"ขาดคอลัมน์บังคับ: {', '.join(missing)}"]
@@ -207,3 +257,8 @@ def template_df() -> pd.DataFrame:
     return pd.DataFrame(_rows(_profile("KKU-001"), [
         (6, 0, 0, 18, 18, 3.00, "ปกติ", 0, 0),
         (7, 0, 0, 21, 21, 3.00, "ปกติ", 0, 0)]), columns=COLUMNS)
+
+
+def template_wide_df(n_terms: int = 8) -> pd.DataFrame:
+    """ไฟล์ตัวอย่างแบบ 1 คน 1 แถว มีช่องให้กรอก 8 เทอม (ค่าตัวอย่างกลาง ๆ ใน 2 เทอมแรก)."""
+    return to_wide(template_df(), n_terms=n_terms)

@@ -90,6 +90,49 @@ KKU_INTERVENTIONS = {
     "same_province": "มาจากต่างจังหวัด — ติดตามการปรับตัวและเครือข่ายเพื่อน",
 }
 
+# ค่าจริงที่ "น่าห่วง" ของฟีเจอร์ มข. — ใช้คู่กับ SHAP ก่อนสร้างข้อเสนอแนะ (ดู feature_labels.should_suggest)
+KKU_CONCERN = {
+    "gpa": lambda r: r["gpa"] < WATCH_GPAX,
+    "gpa_prev": lambda r: r["gpa_prev"] < WATCH_GPAX,
+    "gpa_change": lambda r: r["gpa_change"] < 0,
+    "gpax": lambda r: r["gpax"] < WATCH_GPAX,
+    "gpax_change": lambda r: r["gpax_change"] < 0,
+    "n_f": lambda r: r["n_f"] >= 1,
+    "n_w": lambda r: r["n_w"] >= 1,
+    "course_pass_rate": lambda r: r["course_pass_rate"] < 1,
+    "credit_pass_rate": lambda r: r["credit_pass_rate"] < 1,
+    "credits_behind": lambda r: r["credits_behind"] > 0,
+    "terms_on_probation": lambda r: r["terms_on_probation"] >= 1,
+    "on_probation_now": lambda r: r["on_probation_now"] == 1,
+    "outstanding_debt": lambda r: r["outstanding_debt"] == 1,
+    "late_fine": lambda r: r["late_fine"] == 1,
+    "logins_change": lambda r: r["logins_change"] < 0,
+    "scholarship": lambda r: r["scholarship"] == 0,
+    "health_issue": lambda r: r["health_issue"] == 1,
+}
+
+# ข้อความข้อเสนอแนะแบบ มข. สำหรับฟีเจอร์ UCI (ตอนใช้โมเดล UCI ชั่วคราวกับข้อมูล มข.)
+# เช่น W ของ มข. คือถอนวิชา ไม่ใช่ "ขาดสอบ" แบบชุด UCI และ "ภาค 1/2" คือภาคก่อน/ภาคล่าสุด
+UCI_TIPS_IN_KKU = {
+    "Curricular units 1st sem (without evaluations)": KKU_INTERVENTIONS["n_w"],
+    "Curricular units 2nd sem (without evaluations)": KKU_INTERVENTIONS["n_w"],
+    "eval_rate_1st": KKU_INTERVENTIONS["n_w"],
+    "eval_rate_2nd": KKU_INTERVENTIONS["n_w"],
+    "Curricular units 1st sem (approved)": KKU_INTERVENTIONS["course_pass_rate"],
+    "Curricular units 2nd sem (approved)": KKU_INTERVENTIONS["course_pass_rate"],
+    "pass_rate_1st": KKU_INTERVENTIONS["course_pass_rate"],
+    "pass_rate_2nd": KKU_INTERVENTIONS["course_pass_rate"],
+    "Curricular units 1st sem (grade)": KKU_INTERVENTIONS["gpa_prev"],
+    "Curricular units 2nd sem (grade)": KKU_INTERVENTIONS["gpa"],
+    "grade_change": KKU_INTERVENTIONS["gpa_change"],
+    "pass_rate_change": "สัดส่วนวิชาที่ผ่านลดลงจากภาคก่อน — ค้นหาสาเหตุโดยเร็ว",
+    "zero_pass_1st": "ไม่ผ่านสักวิชาในภาคก่อน — ควรพบอาจารย์ที่ปรึกษาโดยด่วน",
+    "no_grade_1st": "GPA ภาคก่อนเป็น 0 — ตรวจสอบว่าขาดเรียน ลาพัก หรือมีปัญหาการลงทะเบียน",
+    "Debtor": KKU_INTERVENTIONS["outstanding_debt"],
+    "Tuition fees up to date": KKU_INTERVENTIONS["late_fine"],
+    "Scholarship holder": KKU_INTERVENTIONS["scholarship"],
+}
+
 
 def term_label(t: int) -> str:
     return f"ปี{(int(t) - 1) // 2 + 1}/{(int(t) - 1) % 2 + 1}"
@@ -258,7 +301,7 @@ def build_timeline(raw: pd.DataFrame, uci_model, uci_features: list[str], thresh
             p = r["model_prob"]
             if not pd.isna(p):
                 if p >= thr:
-                    raise_to(2, f"{model_name} ประเมิน {p:.0%} เกินเกณฑ์ {thr:.2f}")
+                    raise_to(2, f"{model_name} ประเมิน {p:.0%} เกินเกณฑ์ {thr:.3f}")
                 elif p >= thr * WATCH_FACTOR:
                     raise_to(1, f"{model_name} ประเมิน {p:.0%} ใกล้เกณฑ์")
             # ชั้น 2: ข้อมูล มข.

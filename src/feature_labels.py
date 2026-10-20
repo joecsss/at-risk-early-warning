@@ -115,6 +115,7 @@ INTERVENTIONS: dict[str, str] = {
     "eval_rate_1st": "เข้าประเมินไม่ครบ — ติดตามการเข้าชั้นเรียนและกำหนดการสอบ",
     "eval_rate_2nd": "เข้าประเมินไม่ครบ — ติดตามการเข้าชั้นเรียนและกำหนดการสอบ",
     "zero_pass_1st": "ไม่ผ่านสักวิชาในภาค 1 — เข้าข่ายเสี่ยงสูงมาก ควรพบอาจารย์ที่ปรึกษาโดยด่วน",
+    "no_grade_1st": "ไม่มีเกรดในภาค 1 — ตรวจสอบว่าขาดเรียน ลาพัก หรือมีปัญหาการลงทะเบียน",
     "Debtor": "มีหนี้ค้างชำระ — ประสานงานฝ่ายกิจการนักศึกษาเรื่องผ่อนผัน/ทุนฉุกเฉิน",
     "Tuition fees up to date": "ค้างชำระค่าเล่าเรียน — แนะนำช่องทางผ่อนผันและกองทุนกู้ยืม",
     "financial_risk": "มีภาระทางการเงิน — แนะนำทุนการศึกษา/ทุนทำงาน (work-study)",
@@ -133,7 +134,88 @@ INTERVENTIONS: dict[str, str] = {
 }
 
 MACRO_FEATURES = {"Unemployment rate", "Inflation rate", "GDP"}
+
+# ปัจจัยที่ "เปลี่ยนไม่ได้หรือไม่ควรใช้เป็นเหตุผลในการเรียกพบ" (ภูมิหลัง ครอบครัว ค่าคงที่ของชุด UCI)
+# ยังแสดงในกราฟ SHAP ได้ตามจริง แต่ไม่นำมาสร้างข้อเสนอแนะ เพื่อไม่ให้เกิดการตีตรานักศึกษา
+NON_ACTIONABLE = {
+    # ชุด UCI
+    "Gender", "Marital Status", "Nationality", "International", "Age at enrollment", "is_mature",
+    "Mother's qualification", "Father's qualification", "Mother's occupation", "Father's occupation",
+    "Educational special needs", "Displaced", "Course", "Application mode", "Application order",
+    "Daytime/evening attendance", "Previous qualification", "Admission grade",
+    "Previous qualification (grade)",
+    "Curricular units 1st sem (enrolled)", "Curricular units 2nd sem (enrolled)",
+    "Curricular units 1st sem (credited)", "Curricular units 2nd sem (credited)",
+    *MACRO_FEATURES,
+    # ชุด มข.
+    "male", "age_at_enrollment", "father_education", "mother_education", "parents_marital",
+    "siblings_studying", "same_province", "disability", "admission_method", "program_type",
+    "term_no", "year", "hs_gpax",
+}
+BACKGROUND_NOTE = ("ปัจจัยด้านภูมิหลัง (เพศ อายุ ครอบครัว รอบรับเข้า ผลการเรียนก่อนเข้า) และจำนวนวิชาที่ลง "
+                   "ไม่นำมาเป็นข้อเสนอแนะ เพราะเปลี่ยนไม่ได้และเสี่ยงต่อการตีตรานักศึกษา")
+
+
+def is_actionable(feature: str) -> bool:
+    """ปัจจัยนี้ใช้สร้างข้อเสนอแนะการช่วยเหลือได้ไหม."""
+    return feature not in NON_ACTIONABLE
+
+
 GENERIC_INTERVENTION = "นัดพบเพื่อพูดคุยและประเมินสถานการณ์รายบุคคล"
+
+# ------------------------------------------------ เงื่อนไขก่อนสร้างข้อเสนอแนะ
+# SHAP บวกแปลว่า "ค่านี้ทำให้โมเดลประเมินสูงกว่าคนเฉลี่ย" ไม่ได้แปลว่านักศึกษามีปัญหานั้นจริง
+# (เช่น ไม่ผ่านสักวิชา = ไม่ใช่ แต่ SHAP บวกเล็กน้อยเพราะฟีเจอร์ซ้ำซ้อนกัน)
+# จึงสร้างข้อเสนอแนะเมื่อผ่านครบ 4 ข้อ: ดันความเสี่ยงมากพอ, เป็นปัจจัยที่ช่วยได้,
+# มีข้อเสนอแนะเฉพาะ และค่าจริงของนักศึกษาอยู่ฝั่งที่น่าห่วง
+MIN_SUGGEST_SHAP = 0.20      # log-odds (odds เพิ่มราว 1.22 เท่า) ต่ำกว่านี้ถือว่าผลน้อยเกินไป
+GRADE_LOW_UCI = 11.25        # เกรด UCI 0–20 = GPA มข. × 5 → เทียบ GPA ต่ำกว่า 2.25
+
+
+def _sem(tag: str, what: str) -> str:
+    return f"Curricular units {tag} sem ({what})"
+
+
+CONCERN_UCI = {
+    "zero_pass_1st": lambda r: r["zero_pass_1st"] == 1,
+    "no_grade_1st": lambda r: r["no_grade_1st"] == 1,
+    "Debtor": lambda r: r["Debtor"] == 1,
+    "Tuition fees up to date": lambda r: r["Tuition fees up to date"] == 0,
+    "Scholarship holder": lambda r: r["Scholarship holder"] == 0,
+    "financial_risk": lambda r: r["financial_risk"] >= 1,
+    "grade_change": lambda r: r["grade_change"] < 0,
+    "pass_rate_change": lambda r: r["pass_rate_change"] < 0,
+    "academic_gap": lambda r: r["academic_gap"] > 0,
+    **{f"pass_rate_{t}": (lambda r, t=t: r[f"pass_rate_{t}"] < 1) for t in ("1st", "2nd")},
+    **{f"eval_rate_{t}": (lambda r, t=t: r[f"eval_rate_{t}"] < 1) for t in ("1st", "2nd")},
+    **{_sem(t, "approved"): (lambda r, t=t: r[_sem(t, "approved")] < r[_sem(t, "enrolled")])
+       for t in ("1st", "2nd")},
+    **{_sem(t, "grade"): (lambda r, t=t: r[_sem(t, "grade")] < GRADE_LOW_UCI)
+       for t in ("1st", "2nd")},
+    **{_sem(t, "without evaluations"): (lambda r, t=t: r[_sem(t, "without evaluations")] >= 1)
+       for t in ("1st", "2nd")},
+}
+
+
+def should_suggest(feature: str, shap_value: float, row, rules: dict | None = None,
+                   interventions: dict | None = None) -> bool:
+    """สร้างข้อเสนอแนะจากปัจจัยนี้ไหม (row = ค่าฟีเจอร์ของนักศึกษาคนนั้น แบบ dict/Series)."""
+    rules = CONCERN_UCI if rules is None else rules
+    interventions = INTERVENTIONS if interventions is None else interventions
+    if shap_value < MIN_SUGGEST_SHAP or not is_actionable(feature) or feature not in interventions:
+        return False
+    rule = rules.get(feature)
+    if rule is None:
+        return True
+    try:
+        return bool(rule(row))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+SUGGEST_NOTE = ("ข้อเสนอแนะสร้างเมื่อระดับไม่ใช่ 'ปกติ' จากปัจจัยที่ดันความเสี่ยงตั้งแต่ "
+                f"{MIN_SUGGEST_SHAP:.2f} log-odds และค่าจริงของนักศึกษาอยู่ฝั่งที่น่าห่วง — "
+                "ใช้ประกอบดุลยพินิจเสมอ · " + BACKGROUND_NOTE)
 
 
 def label_th(feature: str) -> str:
