@@ -145,7 +145,10 @@ def term_features(raw: pd.DataFrame) -> pd.DataFrame:
     out = []
     for sid, g in d.groupby("student_id", sort=False):
         g = g.sort_values("term_no").reset_index(drop=True).copy()
-        w = (g["cr"] - 3 * g["n_w"]).clip(lower=1)        # หน่วยกิตที่นำมาคิดเกรด (ประมาณ)
+        # หน่วยกิตที่นำมาคิดเกรด (CA) ≈ CR — ใบเกรด มข. ไม่นับวิชา W ใน CR อยู่แล้ว
+        # (เดิมลบ 3×W ซ้ำ ทำให้ GPAX สำรองต่ำกว่าจริง 0.02) · คลาดได้เล็กน้อยเฉพาะภาคที่มีวิชา AU/S
+        # ค่าสำรองนี้ใช้เฉพาะเมื่อไม่ได้กรอก GPAX — ควรกรอก GPAX จากใบเกรดเสมอ
+        w = g["cr"].clip(lower=1)
         calc = (g["gpa"] * w).cumsum() / w.cumsum()
         g["gpax"] = g["gpax"].fillna(calc).round(2)
         g["gpa_prev"] = g["gpa"].shift(1)

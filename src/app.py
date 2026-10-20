@@ -268,7 +268,7 @@ def factor_chart(expl, row: pd.DataFrame, k: int = 8):
     chart = (
         alt.Chart(fdf).mark_bar().encode(
             x=alt.X("value:Q", title=f"อิทธิพลต่อความเสี่ยง ({expl.units})"),
-            y=alt.Y("ปัจจัย:N", sort=None, title=None),
+            y=alt.Y("ปัจจัย:N", sort=None, title=None, axis=alt.Axis(labelLimit=280)),
             color=alt.Color("ทิศทาง:N", scale=alt.Scale(
                 domain=["เพิ่มความเสี่ยง", "ลดความเสี่ยง"],
                 range=[RISE_COLOR, FALL_COLOR]), legend=alt.Legend(title=None)),
@@ -328,7 +328,7 @@ def kku_factor_chart(fdf: pd.DataFrame, units: str):
     fdf = fdf.assign(ทิศทาง=np.where(fdf["value"] > 0, "เพิ่มความเสี่ยง", "ลดความเสี่ยง"))
     return alt.Chart(fdf).mark_bar().encode(
         x=alt.X("value:Q", title=f"อิทธิพลต่อความเสี่ยง ({units})"),
-        y=alt.Y("ปัจจัย:N", sort=None, title=None),
+        y=alt.Y("ปัจจัย:N", sort=None, title=None, axis=alt.Axis(labelLimit=280)),
         color=alt.Color("ทิศทาง:N", scale=alt.Scale(
             domain=["เพิ่มความเสี่ยง", "ลดความเสี่ยง"], range=[RISE_COLOR, FALL_COLOR]),
             legend=alt.Legend(title=None)),
@@ -340,7 +340,29 @@ def yes_no(v) -> int:
     return int(v == "ใช่")
 
 
-def term_risk_chart(tl_df: pd.DataFrame, title: str, y_title: str | None, height: int):
+def fit(chart):
+    """ให้ Vega จัดเลย์เอาต์ใหม่ทุกครั้งที่ความกว้างเปลี่ยน (resize=True) — ถ้าไม่ตั้ง
+    เมื่อย่อ/ขยายหน้าต่าง แกนและชื่อกราฟจะค้างตำแหน่งเดิมจนถูกตัดขอบ (แกน y หาย ชื่อกราฟขาด)."""
+    return chart.properties(autosize=alt.AutoSizeParams(type="fit-x", contains="padding",
+                                                         resize=True))
+
+
+def credit_vs_plan(cur, prof) -> tuple[str, str]:
+    """ข้อความเทียบหน่วยกิตสะสมกับแผน (แผน = หน่วยกิตตามหลักสูตร ÷ จำนวนภาคตามแผน × ภาคที่เรียนมา)
+    คืน (delta, delta_color) ให้ st.metric — เดิมเขียน "ตามแผน" แม้เร็วกว่าแผนหลายหน่วยกิต."""
+    if cur["credits_behind"]:
+        return f"ช้ากว่าแผน {int(cur['credits_behind'])} หน่วยกิต", "inverse"
+    plan = float(prof["required_credits"]) / float(prof["plan_terms"]) * int(prof["term_no"])
+    ahead = int(round(float(cur["cp_cum"]) - plan))
+    return (f"เร็วกว่าแผน {ahead} หน่วยกิต" if ahead > 0 else "ตามแผน"), "off"
+
+
+def table_height(n_rows: int, max_px: int = 430) -> int:
+    """ความสูงตารางพอดีจำนวนแถว (ไม่มีแถวว่างเมื่อคนน้อย) แต่ไม่เกิน max_px."""
+    return min(max_px, 35 * (max(n_rows, 1) + 1) + 3)
+
+
+def term_risk_chart(tl_df: pd.DataFrame, title: str | None, y_title: str | None, height: int):
     """กราฟความเสี่ยงจากโมเดลรายภาค — ภาคแรกไม่มีค่าโมเดล (ต้องใช้ 2 ภาคติดกัน)
     จึงล็อกแกน x ให้แสดงทุกภาค และเขียนกำกับว่า "ใช้กฎ" แทนการหายไปจากกราฟ."""
     order = tl_df["ภาค"].tolist()
@@ -358,7 +380,8 @@ def term_risk_chart(tl_df: pd.DataFrame, title: str, y_title: str | None, height
     notes = alt.Chart(no_model).mark_text(fontSize=11, color=MUTED).transform_calculate(
         ypos="0.06").encode(x=x, y=alt.Y("ypos:Q"), text="note:N",
                             tooltip=["ภาค", "ระดับ", "เหตุผล"])
-    return alt.layer(bars, notes).properties(height=height, width="container", title=title)
+    chart = alt.layer(bars, notes).properties(height=height, width="container")
+    return chart.properties(title=title) if title else chart
 
 
 # ------------------------------------------------- มุมมองผู้ใช้งาน (2 บทบาท)
@@ -456,7 +479,7 @@ def render_sidebar_settings(is_admin: bool) -> tuple[pd.DataFrame, float]:
         help="ลดค่านี้ = จับกลุ่มเสี่ยงได้ครบขึ้น (recall สูง) แต่แจ้งเตือนเกินจริงมากขึ้น · "
              "มีผลเฉพาะหน้าจอผู้ดูแลในรอบนี้ อาจารย์ที่ปรึกษายังใช้เกณฑ์ที่จูนไว้",
     )
-    st.caption(f"ระดับที่เกณฑ์นี้: เฝ้าระวัง ≥ {threshold / 2:.3f} · เสี่ยง ≥ {threshold:.3f} · "
+    st.caption(f"ระดับที่เกณฑ์นี้: เฝ้าระวัง ≥ {threshold / 2:.3f} · เสี่ยงปานกลาง ≥ {threshold:.3f} · "
                f"เสี่ยงสูง ≥ {threshold + (1 - threshold) / 2:.3f} · "
                f"รายภาค มข.: เฝ้าระวังจากโมเดล ≥ {threshold * WATCH_FACTOR:.3f}")
     if abs(threshold - round(default_threshold, 3)) > 1e-9:
@@ -623,7 +646,7 @@ with tabs[TAB_LIST]:
         })
         st.write(f"พบ **{len(view):,}** คนตามเงื่อนไข (เรียงจากระดับล่าสุดที่รุนแรงที่สุด)")
         st.dataframe(
-            table, hide_index=True, height=430,
+            table, hide_index=True, height=table_height(len(table)),
             column_config={
                 "GPAX": st.column_config.NumberColumn(format="%.2f"),
                 "โมเดล (%)": st.column_config.ProgressColumn(
@@ -678,7 +701,7 @@ with tabs[TAB_LIST]:
 
         st.write(f"พบ **{len(view):,}** คนตามเงื่อนไข (เรียงจากเสี่ยงมากไปน้อย)")
         st.dataframe(
-            table, hide_index=True, height=430,
+            table, hide_index=True, height=table_height(len(table)),
             column_config={"ความเสี่ยง (%)": st.column_config.ProgressColumn(
                 "ความเสี่ยง (%)", min_value=0, max_value=100, format="%.1f%%")},
         )
@@ -704,12 +727,12 @@ with tabs[TAB_PERSON]:
         m1.metric("ระดับล่าสุด", cur["ระดับ"], cur["ภาค"], delta_color="off")
         m2.metric("GPAX ล่าสุด", f"{cur['gpax']:.2f}")
         m3.metric("หน่วยกิตสะสม", f"{cur['cp_cum']} / {int(prof['required_credits'])}",
-                  f"ช้ากว่าแผน {cur['credits_behind']}" if cur["credits_behind"] else "ตามแผน",
-                  delta_color="inverse" if cur["credits_behind"] else "off")
+                  *credit_vs_plan(cur, prof))
         m4.metric("เตือนครั้งแรก", first_alert(kku_tl, sid) or "ยังไม่เคย")
 
-        st.altair_chart(term_risk_chart(tl_one, "ระดับความเสี่ยงรายภาค (สี = ระดับรวม)",
-                                        "ความเสี่ยงจากโมเดล", 220))
+        # ชื่อกราฟเขียนด้วย markdown — ชื่อใน Vega ของกราฟเต็มความกว้างถูกตัดขอบบนใต้การ์ดตัวเลข
+        st.markdown("**ระดับความเสี่ยงรายภาค (สี = ระดับรวม)**")
+        st.altair_chart(fit(term_risk_chart(tl_one, None, "ความเสี่ยงจากโมเดล", 220)))
         st.caption("ภาคแรกยังไม่มีค่าจากโมเดล เพราะโมเดลต้องดู 2 ภาคติดกัน "
                    "ภาคนั้นจึงประเมินด้วยกฎ (GPAX, F/W, หน่วยกิต, การเงิน) อย่างเดียว")
         st.dataframe(
@@ -729,7 +752,7 @@ with tabs[TAB_PERSON]:
             facs = kexpl.top_factors(krow[KKU_FEATURES], k=8)
             fdf = pd.DataFrame([{"feature": f, "ปัจจัย": KKU_FEATURE_LABELS.get(f, f),
                                  "ค่า": str(krow[f].iloc[0]), "value": v} for f, v in facs])
-            st.altair_chart(kku_factor_chart(fdf, kexpl.units))
+            st.altair_chart(fit(kku_factor_chart(fdf, kexpl.units)))
             tips = collect_tips(fdf, tf_one.iloc[-1], KKU_CONCERN, KKU_INTERVENTIONS)
         else:
             wrow = kku_win[(kku_win[ID_COL] == sid) & (kku_win["term_no"] == cur["term_no"])]
@@ -739,7 +762,7 @@ with tabs[TAB_PERSON]:
                 uexpl = load_explainer(model, tuple(features))
                 sv = uexpl.shap_values(wrow[features]).iloc[0]
                 fdf, filled = factors_in_kku_terms(sv, tf_one.iloc[-2], tf_one.iloc[-1])
-                st.altair_chart(kku_factor_chart(fdf.head(8), uexpl.units))
+                st.altair_chart(fit(kku_factor_chart(fdf.head(8), uexpl.units)))
                 st.caption("แสดงเฉพาะปัจจัยที่มาจากข้อมูล มข. จริง · ฟีเจอร์ของชุด UCI ที่ มข. "
                            f"ไม่มีถูกเติมค่าคงที่ (รวมกันมีผล {filled:+.3f}) และไม่นำมาตีความ")
                 tips = collect_tips(fdf, wrow[features].iloc[0], wording=UCI_TIPS_IN_KKU)
@@ -772,7 +795,7 @@ with tabs[TAB_PERSON]:
         with right:
             expl = load_explainer(model, tuple(features))
             chart, factors = factor_chart(expl, row)
-            st.altair_chart(chart)
+            st.altair_chart(fit(chart))
 
         render_suggestions(factors, row, band)
 
@@ -786,19 +809,19 @@ if TAB_MODEL in tabs:
             imp = global_importance(expl, df, tuple(features))
             idf = pd.DataFrame({"ปัจจัย": [label_th(i) for i in imp.index],
                                 "ความสำคัญ": imp.values})
-            st.altair_chart(
+            st.altair_chart(fit(
                 alt.Chart(idf).mark_bar(color=STEEL).encode(
                     x=alt.X("ความสำคัญ:Q", title=f"mean |SHAP| ({expl.units})"),
                     y=alt.Y("ปัจจัย:N", sort="-x", title=None),
                     tooltip=["ปัจจัย", alt.Tooltip("ความสำคัญ:Q", format=".3f")],
-                ).properties(height=420, width="container"))
+                ).properties(height=420, width="container")))
 
         with col_b:
             st.subheader("การกระจายของความเสี่ยง")
             dist = work[["risk", "band"]]
             if len(dist) > 5000:  # ข้อจำกัดจำนวนแถวของ Altair
                 dist = dist.sample(5000, random_state=42)
-            st.altair_chart(
+            st.altair_chart(fit(
                 alt.Chart(dist).mark_bar().encode(
                     x=alt.X("risk:Q", bin=alt.Bin(maxbins=25),
                             title="ความน่าจะเป็นที่จะเสี่ยง"),
@@ -806,7 +829,7 @@ if TAB_MODEL in tabs:
                     color=alt.Color("band:N", scale=alt.Scale(
                         domain=list(BAND_COLORS), range=list(BAND_COLORS.values())),
                         legend=alt.Legend(title="ระดับ")),
-                ).properties(height=260, width="container"))
+                ).properties(height=260, width="container")))
 
             if metrics:
                 st.subheader("ผลเปรียบเทียบโมเดล (5-fold CV)")
@@ -1086,8 +1109,7 @@ with tabs[TAB_KKU]:
             c1.metric("ระดับล่าสุด", cur["ระดับ"], cur["ภาค"], delta_color="off")
             c2.metric("GPAX ล่าสุด", f"{cur['gpax']:.2f}")
             c3.metric("หน่วยกิตสะสม (CP)", f"{cur['cp_cum']} / {int(prof_row['required_credits'])}",
-                      f"ช้ากว่าแผน {cur['credits_behind']}" if cur["credits_behind"] else "ตามแผน",
-                      delta_color="inverse" if cur["credits_behind"] else "off")
+                      *credit_vs_plan(cur, prof_row))
             c4.metric("เตือนครั้งแรก", first_alert(timeline, sid_sel) or "ยังไม่เคย")
             known = is_known_at_risk(status_of.get(sid_sel, "ไม่ทราบ"))
             if known is not None:
@@ -1129,9 +1151,9 @@ with tabs[TAB_KKU]:
             ).properties(height=240, width="container", title="หน่วยกิตสะสม เทียบแผน")
             r_chart = term_risk_chart(tl, "ความเสี่ยงจากโมเดล (สี = ระดับรวม)", None, 240)
             c1, c2, c3 = st.columns(3)
-            c1.altair_chart(g_chart)
-            c2.altair_chart(c_chart)
-            c3.altair_chart(r_chart)
+            c1.altair_chart(fit(g_chart))
+            c2.altair_chart(fit(c_chart))
+            c3.altair_chart(fit(r_chart))
 
             # ---- ตารางแบบหน้าผลการเรียน
             # ภาคแรกไม่มีค่าโมเดล (ต้องใช้ 2 ภาคติดกัน) — เขียน "ใช้กฎ" แทนช่องว่าง/None
@@ -1158,7 +1180,7 @@ with tabs[TAB_KKU]:
                 fdf = pd.DataFrame([{
                     "feature": f, "ปัจจัย": KKU_FEATURE_LABELS.get(f, f),
                     "ค่า": str(row[f].iloc[0]), "value": v} for f, v in facs])
-                st.altair_chart(kku_factor_chart(fdf, kexpl.units))
+                st.altair_chart(fit(kku_factor_chart(fdf, kexpl.units)))
                 tips = collect_tips(fdf, tfs.iloc[-1], KKU_CONCERN, KKU_INTERVENTIONS)
             else:
                 wrow = windows[(windows[ID_COL] == sid_sel) & (windows["term_no"] == cur["term_no"])]
@@ -1169,7 +1191,7 @@ with tabs[TAB_KKU]:
                     uexpl = load_explainer(model, tuple(features))
                     sv = uexpl.shap_values(wrow[features]).iloc[0]
                     fdf, filled = factors_in_kku_terms(sv, tfs.iloc[-2], tfs.iloc[-1])
-                    st.altair_chart(kku_factor_chart(fdf.head(8), uexpl.units))
+                    st.altair_chart(fit(kku_factor_chart(fdf.head(8), uexpl.units)))
                     st.caption(
                         f"แสดงเฉพาะปัจจัยที่มาจากข้อมูล มข. จริง · ฟีเจอร์ของชุด UCI ที่ มข. ไม่มี "
                         f"(คะแนนสอบเข้า, ตัวเลขเศรษฐกิจโปรตุเกส, รหัสสาขา ฯลฯ) ถูกเติมค่าคงที่ "
